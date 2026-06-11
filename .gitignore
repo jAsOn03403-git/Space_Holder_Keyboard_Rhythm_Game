@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.vercel/
+.tools/
+.env
+.env.*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
