@@ -837,12 +837,6 @@ function PlayView({
     touchStartQueueRef.current = [];
     if (!starts.length || playPhase !== "game" || showPauseMenu) return;
 
-    if (!isPlaying) {
-      setShowPauseMenu(false);
-      void togglePlay();
-      return;
-    }
-
     const liveMs = readPlayheadMs();
     const liveChartMs = calibrationActive ? liveMs : liveMs - offsetMs;
     setCurrentMs(liveMs);
@@ -944,7 +938,6 @@ function PlayView({
     scoreUnit,
     showPauseMenu,
     stopRaf,
-    togglePlay,
     updateTouchFeedback,
   ]);
 
@@ -973,6 +966,12 @@ function PlayView({
     );
     activeTouchesRef.current.set(event.pointerId, touch);
     lastTouchReleaseMsRef.current = null;
+    if (!isPlaying) {
+      setShowPauseMenu(false);
+      void togglePlay();
+      updateTouchFeedback();
+      return;
+    }
     touchStartQueueRef.current.push({
       pointerId: event.pointerId,
       x: event.clientX,
@@ -983,7 +982,7 @@ function PlayView({
     });
     updateTouchFeedback();
     scheduleTouchStartBatch();
-  }, [getLiveTimes, playPhase, scheduleTouchStartBatch, showPauseMenu, updateTouchFeedback, updateTouchLaneState]);
+  }, [getLiveTimes, isPlaying, playPhase, scheduleTouchStartBatch, showPauseMenu, togglePlay, updateTouchFeedback, updateTouchLaneState]);
 
   const handleStagePointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (!isTouchPointerEvent(event)) return;
