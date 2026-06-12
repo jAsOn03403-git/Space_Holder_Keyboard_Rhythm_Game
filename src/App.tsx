@@ -1,4 +1,4 @@
-﻿import { ChangeEvent, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+﻿import { ChangeEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlayStats, SpaceSide, TimingEvent, TimingEventType, TimingGroup } from "./types";
 import { DEFAULT_TIMING_GROUP_ID, assignDefaultTimingGroup, createDefaultTimingGroups, createManualChart, createStarterChart, getJudgeResult, normalizeTimingGroups, rebuildChartGrid, sanitizeBpm } from "./lib/charting";
@@ -90,6 +90,7 @@ interface JudgeBurst {
   laneId: string;
   span: number;
   anchorLaneIndex?: number;
+  spaceSide?: SpaceSide;
 }
 
 interface TouchInputState {
@@ -363,6 +364,7 @@ function PlayView({
   const [judgedIds, setJudgedIds] = useState<Set<string>>(() => new Set());
   const [judgedHoldTickIds, setJudgedHoldTickIds] = useState<Set<string>>(() => new Set());
   const [activeLaneIds, setActiveLaneIds] = useState<Set<string>>(() => new Set());
+  const [activeSpaceSides, setActiveSpaceSides] = useState<Set<SpaceSide>>(() => new Set());
   const [judgeBursts, setJudgeBursts] = useState<JudgeBurst[]>([]);
   const [stats, setStats] = useState<PlayStats>(INITIAL_STATS);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
@@ -495,6 +497,7 @@ function PlayView({
     const nextActiveLaneIds = getPressedLaneFeedback(pressedCodesRef.current, activeLanes, activeSpaceLaneIdsRef.current);
     getTouchLaneIds(activeTouchesRef.current).forEach((laneId) => nextActiveLaneIds.add(laneId));
     setActiveLaneIds(nextActiveLaneIds);
+    setActiveSpaceSides(getPressedSpaceSideFeedback(pressedCodesRef.current, activeTouchesRef.current));
   }, [activeLanes]);
 
   const updateTouchLaneState = useCallback((touch: TouchInputState, x: number, y: number, liveChartMs: number): TouchInputState => {
@@ -551,6 +554,7 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
+    setActiveSpaceSides(new Set());
   }, [chart, clearTouchInputs, stopRaf]);
 
   const startGame = useCallback(() => {
@@ -561,6 +565,10 @@ function PlayView({
   const returnToMenu = useCallback(() => {
     resetRun();
     setPlayPhase("menu");
+  }, [resetRun]);
+
+  const restartFromPause = useCallback(() => {
+    resetRun();
   }, [resetRun]);
 
   const togglePlay = useCallback(async () => {
@@ -605,6 +613,7 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
+    setActiveSpaceSides(new Set());
     setShowPauseMenu(true);
   }, [clearTouchInputs, readPlayheadMs, stopRaf]);
 
@@ -612,6 +621,13 @@ function PlayView({
     setShowPauseMenu(false);
     void togglePlay();
   }, [togglePlay]);
+
+  useEffect(() => {
+    if (!showPauseMenu) return;
+    stopRaf();
+    setIsPlaying(false);
+    audioRef.current?.pause();
+  }, [showPauseMenu, stopRaf]);
 
   useEffect(() => {
     const durationMs = calibrationActive ? calibrationDurationMs : chartDuration;
@@ -643,6 +659,7 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
+    setActiveSpaceSides(new Set());
     setCurrentMs(0);
     startAtRef.current = performance.now();
     setIsPlaying(true);
@@ -680,6 +697,7 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
+    setActiveSpaceSides(new Set());
   }, [chart.id, chart.initialLaneCount, chart.laneCount, clearTouchInputs, stopRaf]);
 
   useEffect(() => {
@@ -698,6 +716,7 @@ function PlayView({
     });
     activeSpaceLaneIdsRef.current = [];
     setActiveLaneIds(new Set());
+    setActiveSpaceSides(new Set());
   }, [calibrationActive, chart.laneCount, chart.notes, chartMs, isPlaying, triggeredLaneNoteIds]);
 
   useEffect(() => {
@@ -1304,7 +1323,11 @@ function PlayView({
           <span>combo</span>
         </div>
 
-        <div ref={laneFieldRef} className="lane-field" style={{ ...getLaneCanvasStyle(activeLanes.length, "play"), gridTemplateColumns: makeLaneTemplate(activeLanes) }}>
+        <div
+          ref={laneFieldRef}
+          className={`lane-field ${activeSpaceSides.has("left") ? "space-left-active" : ""} ${activeSpaceSides.has("right") ? "space-right-active" : ""}`}
+          style={{ ...getLaneCanvasStyle(activeLanes.length, "play"), gridTemplateColumns: makeLaneTemplate(activeLanes) }}
+        >
           {activeLanes.map((lane) => (
             <div key={lane.id} className={`lane ${activeLaneIds.has(lane.id) ? "lane-active" : ""} ${approachingSpaceLaneIds.has(lane.id) ? "lane-space-ready" : ""}`}>
               <div className="lane-glow" />
@@ -1350,16 +1373,28 @@ function PlayView({
             (() => {
               const projection = getBurstProjection(burst, activeLanes, chartLaneIndexById);
               return (
-                <JudgeBurstLabel
-                  key={burst.id}
-                  burst={burst}
-                  laneCount={activeLanes.length}
-                  startIndex={projection.startIndex}
-                  span={projection.span}
-                />
+                <Fragment key={burst.id}>
+                  <JudgeHitEffect
+                    burst={burst}
+                    laneCount={activeLanes.length}
+                    startIndex={projection.startIndex}
+                    span={projection.span}
+                  />
+                  <JudgeBurstLabel
+                    burst={burst}
+                    laneCount={activeLanes.length}
+                    startIndex={projection.startIndex}
+                    span={projection.span}
+                  />
+                </Fragment>
               );
             })()
           ))}
+          {judgeBursts
+            .filter((burst) => burst.spaceSide === "left" || burst.spaceSide === "right")
+            .map((burst) => (
+              <span key={`${burst.id}-side`} className={`side-hit-flash ${burst.spaceSide === "left" ? "left" : "right"}`} />
+            ))}
           <div className="judge-line" />
         </div>
         <KeyboardStrip
@@ -1371,7 +1406,7 @@ function PlayView({
         {showPauseMenu ? (
           <div className="pause-overlay" role="dialog" aria-label="Pause menu">
             <button className="primary" onClick={resumeFromPause}>Resume</button>
-            <button onClick={resetRun}>Restart</button>
+            <button onClick={restartFromPause}>Restart</button>
             <button onClick={returnToMenu}>Menu</button>
           </div>
         ) : null}
@@ -3123,6 +3158,29 @@ function JudgeBurstLabel({
   );
 }
 
+function JudgeHitEffect({
+  burst,
+  laneCount,
+  startIndex,
+  span: projectedSpan,
+}: {
+  burst: JudgeBurst;
+  laneCount: number;
+  startIndex: number;
+  span?: number;
+}) {
+  const span = Math.max(1, projectedSpan ?? burst.span);
+  const left = (startIndex / laneCount) * 100;
+  const width = (span / laneCount) * 100;
+
+  return (
+    <span
+      className={`hit-effect ${burst.result} ${burst.spaceSide === "left" ? "left-space-hit" : ""} ${burst.spaceSide === "right" ? "right-space-hit" : ""}`}
+      style={{ left: `${left}%`, width: `${width}%` }}
+    />
+  );
+}
+
 function BpmInput({
   value,
   onChange,
@@ -4223,6 +4281,7 @@ function showJudgeBurst(
     laneId: note.laneId,
     span: note.isSpace ? clampSpaceSpan(note.span ?? 1) : 1,
     anchorLaneIndex: note.anchorLaneIndex,
+    spaceSide: note.spaceSide,
   };
   setter((previous) => [...previous.slice(-6), burst]);
   window.setTimeout(() => {
@@ -4242,6 +4301,7 @@ function showJudgeBursts(
     laneId: note.laneId,
     span: note.isSpace ? clampSpaceSpan(note.span ?? 1) : 1,
     anchorLaneIndex: note.anchorLaneIndex,
+    spaceSide: note.spaceSide,
   }));
   setter((previous) => [...previous, ...bursts].slice(-6));
   window.setTimeout(() => {
@@ -4281,6 +4341,22 @@ function getPressedLaneFeedback(
   });
   extraLaneIds.forEach((laneId) => activeLaneIds.add(laneId));
   return activeLaneIds;
+}
+
+function getPressedSpaceSideFeedback(
+  pressedCodes: Set<string>,
+  activeTouches: Map<number, TouchInputState>,
+) {
+  const activeSides = new Set<SpaceSide>();
+  pressedCodes.forEach((code) => {
+    const side = getSpaceInputSideForCode(code);
+    if (side) activeSides.add(side);
+  });
+  activeTouches.forEach((touch) => {
+    const side = getTouchSpaceSide(touch.x);
+    if (side) activeSides.add(side);
+  });
+  return activeSides;
 }
 
 function getSnapMs(bpm: number, division: number) {
