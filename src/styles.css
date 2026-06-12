@@ -178,6 +178,9 @@ button.primary {
     radial-gradient(circle at 76% 12%, rgba(255, 112, 130, 0.13), transparent 28%),
     linear-gradient(120deg, rgba(121, 231, 242, 0.09), transparent 34%),
     rgba(8, 13, 19, 0.92);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .pause-toggle {
@@ -189,6 +192,7 @@ button.primary {
   padding: 0 0.85rem;
   background: rgba(3, 7, 11, 0.58);
   backdrop-filter: blur(14px);
+  touch-action: manipulation;
 }
 
 .play-menu-screen {
@@ -311,6 +315,7 @@ button.primary {
   font-size: 1.15rem;
   font-weight: 900;
   background: rgba(7, 14, 20, 0.78);
+  touch-action: manipulation;
 }
 
 .pause-overlay button.primary {
@@ -509,6 +514,7 @@ button.primary {
   transform: translateX(-50%);
   border-inline: 1px solid rgba(255, 255, 255, 0.08);
   overflow: visible;
+  touch-action: none;
 }
 
 .lane {
