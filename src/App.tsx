@@ -4,7 +4,8 @@ import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlaySta
 import { DEFAULT_TIMING_GROUP_ID, assignDefaultTimingGroup, createDefaultTimingGroups, createManualChart, createStarterChart, getJudgeResult, normalizeTimingGroups, rebuildChartGrid, sanitizeBpm } from "./lib/charting";
 import { clampLaneCount, findLaneForKey, getKeyboardSegments, getPlayableCodeIndex, shouldIgnoreKey } from "./lib/keyboard";
 
-type Mode = "play" | "editor";
+type Page = "play" | "editor";
+type PlayPhase = "menu" | "game";
 type PlacementMode = "select" | "tap" | "tap-hold" | "space-left" | "space-right" | "space-hold" | "lane";
 
 interface SelectionRange {
@@ -89,7 +90,7 @@ interface JudgeBurst {
 }
 
 export default function App() {
-  const [mode, setMode] = useState<Mode>("play");
+  const [page, setPage] = useState<Page>(() => getPageFromPath(window.location.pathname));
   const [chart, setChart] = useState<Chart>(() => createStarterChart());
   const [musicVolume, setMusicVolume] = useStoredNumber("keyboard-beat-lab:music-volume", 0.82);
   const [keyVolume, setKeyVolume] = useStoredNumber("keyboard-beat-lab:key-volume", 0.9);
@@ -101,9 +102,15 @@ export default function App() {
   const [offsetMs, setOffsetMs] = useStoredNumber("keyboard-beat-lab:key-offset-ms", 0);
   const [autoplay, setAutoplay] = useStoredBoolean("keyboard-beat-lab:autoplay", false);
 
+  useEffect(() => {
+    const handlePopState = () => setPage(getPageFromPath(window.location.pathname));
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
   return (
-    <main className={`app-shell ${mode === "play" ? "play-shell" : ""}`}>
-      {mode === "editor" ? (
+    <main className={`app-shell ${page === "play" ? "play-shell" : ""}`}>
+      {page === "editor" ? (
         <header className="topbar">
           <div className="brand">
             <img className="brand-artwork" src={chart.meta.coverUrl || "/cover.svg"} alt="" />
@@ -112,21 +119,17 @@ export default function App() {
               <span>{chart.meta.artist || "Unknown Artist"}</span>
             </div>
           </div>
-          <nav className="mode-tabs" aria-label="Mode selector">
-            <button onClick={() => setMode("play")}>Play</button>
-            <button className={mode === "editor" ? "active" : ""} onClick={() => setMode("editor")}>Editor</button>
-          </nav>
         </header>
       ) : null}
 
-      {mode === "play" ? (
+      {page === "play" ? (
         <PlayView
           chart={chart}
+          onChartChange={setChart}
           musicVolume={musicVolume}
           keyVolume={keyVolume}
           noteSpeed={playSpeed}
           noteSize={noteSize}
-          snapDivision={snapDivision}
           offsetMs={offsetMs}
           autoplay={autoplay}
           onMusicVolumeChange={setMusicVolume}
@@ -135,7 +138,6 @@ export default function App() {
           onNoteSizeChange={setNoteSize}
           onOffsetChange={setOffsetMs}
           onAutoplayChange={setAutoplay}
-          onOpenEditor={() => setMode("editor")}
         />
       ) : (
         <EditorView
@@ -185,13 +187,15 @@ function useStoredBoolean(key: string, fallback: boolean) {
   return [value, setValue] as const;
 }
 
-function PlayView({
-  chart,
+function getPageFromPath(pathname: string): Page {
+  return pathname.replace(/\/+$/, "") === "/editor" ? "editor" : "play";
+}
+
+function PlaySettingsControls({
   musicVolume,
   keyVolume,
   noteSpeed,
   noteSize,
-  snapDivision,
   offsetMs,
   autoplay,
   onMusicVolumeChange,
@@ -200,14 +204,11 @@ function PlayView({
   onNoteSizeChange,
   onOffsetChange,
   onAutoplayChange,
-  onOpenEditor,
 }: {
-  chart: Chart;
   musicVolume: number;
   keyVolume: number;
   noteSpeed: number;
   noteSize: number;
-  snapDivision: number;
   offsetMs: number;
   autoplay: boolean;
   onMusicVolumeChange: (volume: number) => void;
@@ -216,8 +217,112 @@ function PlayView({
   onNoteSizeChange: (size: number) => void;
   onOffsetChange: (offsetMs: number) => void;
   onAutoplayChange: (enabled: boolean) => void;
-  onOpenEditor: () => void;
 }) {
+  return (
+    <div className="play-settings-controls">
+      <label className="speed-control">
+        <span>Speed {noteSpeed.toFixed(1)}x</span>
+        <input
+          type="range"
+          min={0.6}
+          max={2.2}
+          step={0.1}
+          value={noteSpeed}
+          onChange={(event) => onNoteSpeedChange(Number(event.target.value))}
+        />
+      </label>
+      <label className="speed-control">
+        <span>Note Width {Math.round(noteSize)}%</span>
+        <input
+          type="range"
+          min={50}
+          max={100}
+          step={1}
+          value={noteSize}
+          onChange={(event) => onNoteSizeChange(Number(event.target.value))}
+        />
+      </label>
+      <label className="speed-control">
+        <span>Music {Math.round(musicVolume * 100)}%</span>
+        <input
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={musicVolume}
+          onChange={(event) => onMusicVolumeChange(Number(event.target.value))}
+        />
+      </label>
+      <label className="speed-control">
+        <span>Key {Math.round(keyVolume * 100)}%</span>
+        <input
+          type="range"
+          min={0}
+          max={1.5}
+          step={0.01}
+          value={keyVolume}
+          onChange={(event) => onKeyVolumeChange(Number(event.target.value))}
+        />
+      </label>
+      <label className="speed-control">
+        <span>Chart Offset {Math.round(offsetMs)}ms</span>
+        <input
+          type="range"
+          min={-200}
+          max={200}
+          step={1}
+          value={offsetMs}
+          onChange={(event) => onOffsetChange(Number(event.target.value))}
+        />
+      </label>
+      <label className="speed-control toggle-control">
+        <span>Autoplay</span>
+        <input
+          type="checkbox"
+          checked={autoplay}
+          onChange={(event) => onAutoplayChange(event.target.checked)}
+        />
+      </label>
+    </div>
+  );
+}
+
+function PlayView({
+  chart,
+  onChartChange,
+  musicVolume,
+  keyVolume,
+  noteSpeed,
+  noteSize,
+  offsetMs,
+  autoplay,
+  onMusicVolumeChange,
+  onKeyVolumeChange,
+  onNoteSpeedChange,
+  onNoteSizeChange,
+  onOffsetChange,
+  onAutoplayChange,
+}: {
+  chart: Chart;
+  onChartChange: (chart: Chart) => void;
+  musicVolume: number;
+  keyVolume: number;
+  noteSpeed: number;
+  noteSize: number;
+  offsetMs: number;
+  autoplay: boolean;
+  onMusicVolumeChange: (volume: number) => void;
+  onKeyVolumeChange: (volume: number) => void;
+  onNoteSpeedChange: (speed: number) => void;
+  onNoteSizeChange: (size: number) => void;
+  onOffsetChange: (offsetMs: number) => void;
+  onAutoplayChange: (enabled: boolean) => void;
+}) {
+  const [playPhase, setPlayPhase] = useState<PlayPhase>("menu");
+  const [menuStatus, setMenuStatus] = useState("导入音频、曲绘和 JSON 后开始游玩");
+  const playAudioInputRef = useRef<HTMLInputElement | null>(null);
+  const playArtworkInputRef = useRef<HTMLInputElement | null>(null);
+  const playChartInputRef = useRef<HTMLInputElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
   const [judgedIds, setJudgedIds] = useState<Set<string>>(() => new Set());
@@ -225,7 +330,6 @@ function PlayView({
   const [activeLaneIds, setActiveLaneIds] = useState<Set<string>>(() => new Set());
   const [judgeBursts, setJudgeBursts] = useState<JudgeBurst[]>([]);
   const [stats, setStats] = useState<PlayStats>(INITIAL_STATS);
-  const [showSettings, setShowSettings] = useState(false);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
   const [calibrationActive, setCalibrationActive] = useState(false);
   const [calibrationSamples, setCalibrationSamples] = useState<number[]>([]);
@@ -350,6 +454,16 @@ function PlayView({
     setActiveLaneIds(new Set());
   }, [chart, stopRaf]);
 
+  const startGame = useCallback(() => {
+    resetRun();
+    setPlayPhase("game");
+  }, [resetRun]);
+
+  const returnToMenu = useCallback(() => {
+    resetRun();
+    setPlayPhase("menu");
+  }, [resetRun]);
+
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
     const resumeMs = currentMs >= chartDuration - 100 ? 0 : currentMs;
@@ -385,7 +499,6 @@ function PlayView({
     stopRaf();
     setIsPlaying(false);
     setCurrentMs(liveMs);
-    setShowSettings(false);
     audioRef.current?.pause();
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
@@ -424,7 +537,6 @@ function PlayView({
     setJudgeBursts([]);
     setStats(INITIAL_STATS);
     setShowPauseMenu(false);
-    setShowSettings(true);
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
     armedHoldInputsRef.current.clear();
@@ -611,12 +723,9 @@ function PlayView({
     const handleKeyDown = (event: KeyboardEvent) => {
       const code = normalizeKeyboardEventCode(event);
       const ignored = shouldIgnoreKey(code);
+      if (playPhase !== "game") return;
       if (code === "Escape") {
         event.preventDefault();
-        if (showSettings) {
-          setShowSettings(false);
-          return;
-        }
         if (showPauseMenu) {
           resumeFromPause();
         } else {
@@ -672,7 +781,6 @@ function PlayView({
       }
 
       if (!isPlaying) {
-        setShowSettings(false);
         setShowPauseMenu(false);
         void togglePlay();
         return;
@@ -726,7 +834,7 @@ function PlayView({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [activeLanes, calibrationActive, calibrationLane, calibrationSamples, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedIds, judgementWindowNotes, keyVolume, onOffsetChange, openPauseMenu, readPlayheadMs, resumeFromPause, showPauseMenu, showSettings, stopRaf, togglePlay, scoreUnit]);
+  }, [activeLanes, calibrationActive, calibrationLane, calibrationSamples, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedIds, judgementWindowNotes, keyVolume, onOffsetChange, openPauseMenu, playPhase, readPlayheadMs, resumeFromPause, showPauseMenu, stopRaf, togglePlay, scoreUnit]);
 
   const approachingLaneIds = useMemo(() => {
     const next = new Set<string>();
@@ -749,83 +857,127 @@ function PlayView({
   }, [activeLanes, chartLaneIndexById, chartMs, judgedIds, visiblePlayableNotes]);
   const displayJudgedIds = calibrationActive ? calibrationHitIds : judgedIds;
 
+  const handlePlayAudio = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setMenuStatus("正在读取音频...");
+    const audioUrl = await readFileAsDataUrl(file);
+    const parsedMeta = parseAudioFileName(file.name);
+    const embeddedCoverUrl = await readEmbeddedArtwork(file);
+    const durationMs = await readAudioDurationMs(audioUrl).catch(() => chart.meta.durationMs);
+    const shouldUseFileMeta = chart.notes.length === 0;
+    onChartChange({
+      ...chart,
+      meta: {
+        ...chart.meta,
+        title: shouldUseFileMeta ? parsedMeta.title : chart.meta.title,
+        artist: shouldUseFileMeta ? parsedMeta.artist : chart.meta.artist,
+        durationMs,
+        audioUrl,
+        audioFileName: file.name,
+        coverUrl: embeddedCoverUrl ?? chart.meta.coverUrl,
+      },
+    });
+    setMenuStatus(`已导入音频 ${file.name}${embeddedCoverUrl ? " · 已读取内嵌曲绘" : ""}`);
+  };
+
+  const handlePlayArtwork = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    void readFileAsDataUrl(file).then((coverUrl) => {
+      onChartChange({
+        ...chart,
+        meta: {
+          ...chart.meta,
+          coverUrl,
+          coverFileName: file.name,
+        },
+      });
+      setMenuStatus(`已导入曲绘 ${file.name}`);
+    });
+  };
+
+  const handlePlayChart = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text()) as Chart;
+      const result = normalizeImportedChart(parsed);
+      if (result.error || !result.chart) {
+        setMenuStatus(result.error ?? "导入 JSON 失败");
+        return;
+      }
+      onChartChange({
+        ...result.chart,
+        meta: {
+          ...result.chart.meta,
+          audioUrl: result.chart.meta.audioUrl ?? chart.meta.audioUrl,
+          audioFileName: result.chart.meta.audioFileName ?? chart.meta.audioFileName,
+          coverUrl: result.chart.meta.coverUrl ?? chart.meta.coverUrl,
+          coverFileName: result.chart.meta.coverFileName ?? chart.meta.coverFileName,
+        },
+      });
+      setMenuStatus(`已导入谱面 ${file.name} · ${result.chart.notes.length} notes`);
+    } catch {
+      setMenuStatus("导入 JSON 失败");
+    }
+  };
+
+  if (playPhase === "menu") {
+    return (
+      <section className="play-menu-screen">
+        <input ref={playAudioInputRef} hidden type="file" accept="audio/*" onChange={handlePlayAudio} />
+        <input ref={playArtworkInputRef} hidden type="file" accept="image/*" onChange={handlePlayArtwork} />
+        <input ref={playChartInputRef} hidden type="file" accept="application/json" onChange={handlePlayChart} />
+        <div className="play-menu-hero">
+          <div className="play-menu-song">
+            <img src={chart.meta.coverUrl || "/cover.svg"} alt="" />
+            <div>
+              <h1>{chart.meta.title}</h1>
+              <p>{chart.meta.artist || "Unknown Artist"}</p>
+              <span>{chart.notes.length} notes · {chart.bpm} BPM · {getInitialLaneCount(chart)}K</span>
+            </div>
+          </div>
+          <div className="play-menu-actions">
+            <button className="primary" onClick={() => playAudioInputRef.current?.click()}>Import Audio</button>
+            <button onClick={() => playArtworkInputRef.current?.click()}>Upload Artwork</button>
+            <button onClick={() => playChartInputRef.current?.click()}>Import JSON</button>
+            <button className="primary play-start-button" onClick={startGame}>Play</button>
+          </div>
+          <p className="play-menu-status">{menuStatus}</p>
+        </div>
+        <section className="play-menu-settings" aria-label="Play settings">
+          <h2>Settings</h2>
+          <PlaySettingsControls
+            musicVolume={musicVolume}
+            keyVolume={keyVolume}
+            noteSpeed={noteSpeed}
+            noteSize={noteSize}
+            offsetMs={offsetMs}
+            autoplay={autoplay}
+            onMusicVolumeChange={onMusicVolumeChange}
+            onKeyVolumeChange={onKeyVolumeChange}
+            onNoteSpeedChange={onNoteSpeedChange}
+            onNoteSizeChange={onNoteSizeChange}
+            onOffsetChange={onOffsetChange}
+            onAutoplayChange={onAutoplayChange}
+          />
+        </section>
+      </section>
+    );
+  }
+
   return (
     <section className="play-screen">
       <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={() => setIsPlaying(false)} />
 
       <section className="stage" aria-label="Rhythm playfield">
-        <button className="settings-toggle" onClick={() => setShowSettings((previous) => !previous)}>
-          Settings
+        <button className="pause-toggle" onClick={openPauseMenu}>
+          Pause
         </button>
-
-        {showSettings ? (
-          <div className="play-settings-panel">
-            <button onClick={onOpenEditor}>Editor</button>
-            <label className="speed-control">
-              <span>Speed {noteSpeed.toFixed(1)}x</span>
-              <input
-                type="range"
-                min={0.6}
-                max={2.2}
-                step={0.1}
-                value={noteSpeed}
-                onChange={(event) => onNoteSpeedChange(Number(event.target.value))}
-              />
-            </label>
-            <label className="speed-control">
-              <span>Note Size {Math.round(noteSize)}%</span>
-              <input
-                type="range"
-                min={50}
-                max={100}
-                step={1}
-                value={noteSize}
-                onChange={(event) => onNoteSizeChange(Number(event.target.value))}
-              />
-            </label>
-            <label className="speed-control">
-              <span>Music {Math.round(musicVolume * 100)}%</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={musicVolume}
-                onChange={(event) => onMusicVolumeChange(Number(event.target.value))}
-              />
-            </label>
-            <label className="speed-control">
-              <span>Key {Math.round(keyVolume * 100)}%</span>
-              <input
-                type="range"
-                min={0}
-                max={1.5}
-                step={0.01}
-                value={keyVolume}
-                onChange={(event) => onKeyVolumeChange(Number(event.target.value))}
-              />
-            </label>
-            <label className="speed-control">
-              <span>Chart Offset {Math.round(offsetMs)}ms</span>
-              <input
-                type="range"
-                min={-200}
-                max={200}
-                step={1}
-                value={offsetMs}
-                onChange={(event) => onOffsetChange(Number(event.target.value))}
-              />
-            </label>
-            <label className="speed-control toggle-control">
-              <span>Autoplay</span>
-              <input
-                type="checkbox"
-                checked={autoplay}
-                onChange={(event) => onAutoplayChange(event.target.checked)}
-              />
-            </label>
-          </div>
-        ) : null}
 
         <aside className="play-song-hud">
           <div className="score-readout">
@@ -915,8 +1067,9 @@ function PlayView({
         />
         {showPauseMenu ? (
           <div className="pause-overlay" role="dialog" aria-label="Pause menu">
-            <button onClick={resetRun}>Restart</button>
             <button className="primary" onClick={resumeFromPause}>Resume</button>
+            <button onClick={resetRun}>Restart</button>
+            <button onClick={returnToMenu}>Menu</button>
           </div>
         ) : null}
       </section>
@@ -1740,46 +1893,29 @@ function EditorView({
 
   const loadChartJson = async (json: string, handle?: WritableFileHandle, packageAssets?: PackageAssets) => {
     const parsed = JSON.parse(json) as Chart;
-    const parsedLaneCount = parsed.laneCount;
-    const parsedInitialLaneCount = parsed.initialLaneCount;
-    const isEvenLaneChart = parsedLaneCount >= 2
-      && parsedLaneCount <= 10
-      && parsedLaneCount % 2 === 0
-      && parsedInitialLaneCount >= 2
-      && parsedInitialLaneCount <= parsedLaneCount
-      && parsedInitialLaneCount % 2 === 0
-      && parsed.lanes.length === parsedLaneCount;
-    if (!isEvenLaneChart) {
-      setAnalysisLabel("导入失败：当前只接受 2-10 的偶数轨谱面，并需要合法初始轨道");
+    const result = normalizeImportedChart(parsed);
+    if (result.error || !result.chart) {
+      setAnalysisLabel(result.error ?? "导入 JSON 失败");
       return;
     }
-    const parsedTimingGroups = normalizeTimingGroups(parsed.timingGroups);
-    const validTimingGroupIds = new Set(parsedTimingGroups.map((group) => group.id));
-    const normalizedNotes = assignDefaultTimingGroup(parsed.notes).map((note) => {
-      const timingGroupId = validTimingGroupIds.has(note.timingGroupId ?? "") ? note.timingGroupId : DEFAULT_TIMING_GROUP_ID;
-      return isLaneNote(note)
-        ? { ...note, timingGroupId, targetLaneCount: Math.min(parsedLaneCount, clampLaneCount(note.targetLaneCount ?? parsedInitialLaneCount)) }
-        : { ...note, timingGroupId };
-    });
-    setBpm(parsed.bpm);
-    setBpmInput(String(parsed.bpm));
-    setLaneCount(parsedLaneCount);
-    setInitialLaneCount(parsedInitialLaneCount);
+    const normalizedChart = result.chart;
+    setBpm(normalizedChart.bpm);
+    setBpmInput(String(normalizedChart.bpm));
+    setLaneCount(normalizedChart.laneCount);
+    setInitialLaneCount(normalizedChart.initialLaneCount);
     setEditTimeMs(0);
     setSelectedNoteIds(new Set());
     setSelectionRange(null);
     chartFileHandleRef.current = handle ?? null;
     onChartChange({
-      ...parsed,
+      ...normalizedChart,
       meta: {
-        ...parsed.meta,
-        audioUrl: packageAssets?.audioUrl ?? parsed.meta.audioUrl,
-        audioFileName: packageAssets?.audioFileName ?? parsed.meta.audioFileName,
-        coverUrl: packageAssets?.coverUrl ?? parsed.meta.coverUrl,
-        coverFileName: packageAssets?.coverFileName ?? parsed.meta.coverFileName,
+        ...normalizedChart.meta,
+        audioUrl: packageAssets?.audioUrl ?? normalizedChart.meta.audioUrl,
+        audioFileName: packageAssets?.audioFileName ?? normalizedChart.meta.audioFileName,
+        coverUrl: packageAssets?.coverUrl ?? normalizedChart.meta.coverUrl,
+        coverFileName: packageAssets?.coverFileName ?? normalizedChart.meta.coverFileName,
       },
-      notes: normalizedNotes,
-      timingGroups: parsedTimingGroups,
     });
   };
 
@@ -4030,6 +4166,39 @@ function prepareChartForExport(chart: Chart): Chart {
       timingGroupId: validTimingGroupIds.has(note.timingGroupId ?? "") ? note.timingGroupId : DEFAULT_TIMING_GROUP_ID,
     })),
     timingGroups,
+  };
+}
+
+function normalizeImportedChart(parsed: Chart): { chart?: Chart; error?: string } {
+  const parsedLaneCount = parsed.laneCount;
+  const parsedInitialLaneCount = parsed.initialLaneCount;
+  const isEvenLaneChart = parsedLaneCount >= 2
+    && parsedLaneCount <= 10
+    && parsedLaneCount % 2 === 0
+    && parsedInitialLaneCount >= 2
+    && parsedInitialLaneCount <= parsedLaneCount
+    && parsedInitialLaneCount % 2 === 0
+    && parsed.lanes.length === parsedLaneCount;
+
+  if (!isEvenLaneChart) {
+    return { error: "导入失败：当前只接受 2-10 的偶数轨谱面，并需要合法初始轨道" };
+  }
+
+  const parsedTimingGroups = normalizeTimingGroups(parsed.timingGroups);
+  const validTimingGroupIds = new Set(parsedTimingGroups.map((group) => group.id));
+  const normalizedNotes = assignDefaultTimingGroup(parsed.notes).map((note) => {
+    const timingGroupId = validTimingGroupIds.has(note.timingGroupId ?? "") ? note.timingGroupId : DEFAULT_TIMING_GROUP_ID;
+    return isLaneNote(note)
+      ? { ...note, timingGroupId, targetLaneCount: Math.min(parsedLaneCount, clampLaneCount(note.targetLaneCount ?? parsedInitialLaneCount)) }
+      : { ...note, timingGroupId };
+  });
+
+  return {
+    chart: {
+      ...parsed,
+      notes: normalizedNotes,
+      timingGroups: parsedTimingGroups,
+    },
   };
 }
 
