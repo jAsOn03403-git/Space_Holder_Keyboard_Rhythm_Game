@@ -375,6 +375,8 @@ function PlayView({
   const [currentMs, setCurrentMs] = useState(0);
   const [judgedIds, setJudgedIds] = useState<Set<string>>(() => new Set());
   const [judgedHoldTickIds, setJudgedHoldTickIds] = useState<Set<string>>(() => new Set());
+  const [startedHoldIds, setStartedHoldIds] = useState<Set<string>>(() => new Set());
+  const [failedHoldIds, setFailedHoldIds] = useState<Set<string>>(() => new Set());
   const [activeLaneIds, setActiveLaneIds] = useState<Set<string>>(() => new Set());
   const [activeSpaceSides, setActiveSpaceSides] = useState<Set<SpaceSide>>(() => new Set());
   const [judgeBursts, setJudgeBursts] = useState<JudgeBurst[]>([]);
@@ -390,7 +392,8 @@ function PlayView({
   const animationRef = useRef<number | null>(null);
   const pressedCodesRef = useRef<Set<string>>(new Set());
   const keyPressTimesRef = useRef<Map<string, number>>(new Map());
-  const armedHoldInputsRef = useRef<Map<string, number>>(new Map());
+  const startedHoldIdsRef = useRef<Set<string>>(new Set());
+  const failedHoldIdsRef = useRef<Set<string>>(new Set());
   const activeSpaceLaneIdsRef = useRef<string[]>([]);
   const laneFieldRef = useRef<HTMLDivElement | null>(null);
   const activeTouchesRef = useRef<Map<number, TouchInputState>>(new Map());
@@ -493,6 +496,25 @@ function PlayView({
     }
   }, []);
 
+  const clearHoldRunState = useCallback(() => {
+    startedHoldIdsRef.current.clear();
+    failedHoldIdsRef.current.clear();
+    setStartedHoldIds(new Set());
+    setFailedHoldIds(new Set());
+  }, []);
+
+  const markHoldStarted = useCallback((noteId: string) => {
+    if (startedHoldIdsRef.current.has(noteId)) return;
+    startedHoldIdsRef.current = new Set(startedHoldIdsRef.current).add(noteId);
+    setStartedHoldIds(new Set(startedHoldIdsRef.current));
+  }, []);
+
+  const markHoldFailed = useCallback((noteId: string) => {
+    if (failedHoldIdsRef.current.has(noteId)) return;
+    failedHoldIdsRef.current = new Set(failedHoldIdsRef.current).add(noteId);
+    setFailedHoldIds(new Set(failedHoldIdsRef.current));
+  }, []);
+
   const getLiveTimes = useCallback(() => {
     const liveMs = isPlaying ? readPlayheadMs() : currentMs;
     return {
@@ -551,6 +573,7 @@ function PlayView({
     setCurrentMs(0);
     setJudgedIds(new Set());
     setJudgedHoldTickIds(new Set());
+    clearHoldRunState();
     setTriggeredLaneNoteIds(new Set());
     setCurrentLaneCount(getInitialLaneCount(chart));
     setStats(INITIAL_STATS);
@@ -562,12 +585,11 @@ function PlayView({
     }
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
-    armedHoldInputsRef.current.clear();
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
     setActiveSpaceSides(new Set());
-  }, [chart, clearTouchInputs, stopRaf]);
+  }, [chart, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   const startGame = useCallback(() => {
     resetRun();
@@ -621,7 +643,6 @@ function PlayView({
     audioRef.current?.pause();
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
-    armedHoldInputsRef.current.clear();
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
@@ -660,6 +681,7 @@ function PlayView({
     setCalibrationResultMs(null);
     setJudgedIds(new Set());
     setJudgedHoldTickIds(new Set());
+    clearHoldRunState();
     setTriggeredLaneNoteIds(new Set());
     setCurrentLaneCount(getInitialLaneCount(chart));
     setJudgeBursts([]);
@@ -667,7 +689,6 @@ function PlayView({
     setShowPauseMenu(false);
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
-    armedHoldInputsRef.current.clear();
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
@@ -676,7 +697,7 @@ function PlayView({
     startAtRef.current = performance.now();
     setIsPlaying(true);
     animationRef.current = requestAnimationFrame(tick);
-  }, [chart, clearTouchInputs, stopRaf, tick]);
+  }, [chart, clearHoldRunState, clearTouchInputs, stopRaf, tick]);
 
   useEffect(() => {
     return stopRaf;
@@ -694,6 +715,7 @@ function PlayView({
     if (audioRef.current) audioRef.current.currentTime = 0;
     setJudgedIds(new Set());
     setJudgedHoldTickIds(new Set());
+    clearHoldRunState();
     setTriggeredLaneNoteIds(new Set());
     setCurrentLaneCount(getInitialLaneCount(chart));
     setStats(INITIAL_STATS);
@@ -705,12 +727,11 @@ function PlayView({
     setCalibrationSamples([]);
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
-    armedHoldInputsRef.current.clear();
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
     setActiveSpaceSides(new Set());
-  }, [chart.id, chart.initialLaneCount, chart.laneCount, clearTouchInputs, stopRaf]);
+  }, [chart.id, chart.initialLaneCount, chart.laneCount, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   useEffect(() => {
     if (!isPlaying || calibrationActive) return;
@@ -763,6 +784,40 @@ function PlayView({
   }, [activeLanes.length, autoplay, calibrationActive, chart.lanes.length, chartLaneIndexById, chartMs, isPlaying, judgedIds, judgementWindowNotes, scoreUnit]);
 
   useEffect(() => {
+    if (!isPlaying || calibrationActive || autoplay) return;
+
+    const failedStarts = judgementWindowNotes.filter((note) => (
+      note.type === "hold"
+      && !note.isSpace
+      && !judgedIds.has(note.id)
+      && !startedHoldIdsRef.current.has(note.id)
+      && !failedHoldIdsRef.current.has(note.id)
+      && chartMs > note.timeMs + HIT_WINDOW_MS
+      && activeLanes.some((lane) => lane.id === note.laneId)
+    ));
+    if (!failedStarts.length) return;
+
+    const missedTicks = failedStarts.flatMap((note) => (
+      getHoldDensityTimes(note).map((_, tickIndex) => ({ note, tickId: getHoldTickId(note, tickIndex) }))
+    ));
+    failedStarts.forEach((note) => markHoldFailed(note.id));
+    setJudgedIds((previous) => {
+      const next = new Set(previous);
+      failedStarts.forEach((note) => next.add(note.id));
+      return next;
+    });
+    if (missedTicks.length) {
+      setJudgedHoldTickIds((previous) => {
+        const next = new Set(previous);
+        missedTicks.forEach(({ tickId }) => next.add(tickId));
+        return next;
+      });
+      setStats((previous) => applyJudges(previous, missedTicks.map(() => "miss" as const), scoreUnit));
+      showJudgeBursts(missedTicks.map(({ note }) => ({ note, result: "miss" as const })), setJudgeBursts);
+    }
+  }, [activeLanes, autoplay, calibrationActive, chartMs, isPlaying, judgedIds, judgementWindowNotes, markHoldFailed, scoreUnit]);
+
+  useEffect(() => {
     if (!isPlaying || !autoplay) return;
     if (calibrationActive) return;
 
@@ -793,6 +848,8 @@ function PlayView({
     const dueTicks: Array<{ note: Note; tickId: string; timeMs: number }> = [];
     judgementWindowNotes.forEach((note) => {
       if (note.type !== "hold" || judgedIds.has(note.id)) return;
+      if (!note.isSpace && failedHoldIdsRef.current.has(note.id)) return;
+      if (!note.isSpace && !autoplay && !startedHoldIdsRef.current.has(note.id)) return;
       if (note.isSpace && !getSpaceProjection(note, activeLanes, chartLaneIndexById).isJudgeable) {
         if (chartMs >= getNoteEndTimeMs(note)) {
           setJudgedIds((previous) => new Set(previous).add(note.id));
@@ -819,7 +876,6 @@ function PlayView({
           activeLanes,
           chartLaneIndexById,
           keyPressTimesRef.current,
-          armedHoldInputsRef.current,
           timeMs,
           chartMs,
           getTouchHoldSnapshot(),
@@ -830,9 +886,6 @@ function PlayView({
       nextTickIds.add(tickId);
       const result: JudgeResult = input.isEligible ? "great" : "miss";
       judgedTickResults.push({ note, result });
-      if (input.isEligible && input.code && typeof input.pressMs === "number") {
-        armedHoldInputsRef.current.set(input.code, input.pressMs);
-      }
       if (input.isEligible) {
         playHitKeySoundOnce(note, activeLanes, chartLaneIndexById, keyVolume, playedKeySounds);
       }
@@ -905,6 +958,19 @@ function PlayView({
     const unavailableNoteIds = new Set(judgedIds);
     const consumedPointers = new Set<number>();
     const matches: Array<{ note: Note; result: JudgeResult }> = [];
+    const startedHoldTickMatches: Array<{ note: Note; tickId: string; result: JudgeResult }> = [];
+
+    const findClosestLaneStartNote = (predicate: (note: Note) => boolean) => judgementWindowNotes
+      .filter((note) => {
+        if (unavailableNoteIds.has(note.id) || !predicate(note)) return false;
+        if (note.type !== "hold") return true;
+        return !note.isSpace
+          && !startedHoldIdsRef.current.has(note.id)
+          && !failedHoldIdsRef.current.has(note.id);
+      })
+      .map((note) => ({ note, offset: liveChartMs - note.timeMs }))
+      .filter(({ offset }) => Math.abs(offset) <= HIT_WINDOW_MS)
+      .sort((a, b) => Math.abs(a.offset) - Math.abs(b.offset))[0];
 
     const findClosestInstantNote = (predicate: (note: Note) => boolean) => judgementWindowNotes
       .filter((note) => !unavailableNoteIds.has(note.id) && note.type !== "hold" && predicate(note))
@@ -914,11 +980,23 @@ function PlayView({
 
     starts.forEach((touch) => {
       if (touch.laneId === undefined || consumedPointers.has(touch.pointerId)) return;
-      const target = findClosestInstantNote((note) => !note.isSpace && note.laneId === touch.laneId);
+      const target = findClosestLaneStartNote((note) => !note.isSpace && note.laneId === touch.laneId);
       if (!target) return;
       consumedPointers.add(touch.pointerId);
+      const result = getJudgeResult(target.offset);
+      if (target.note.type === "hold") {
+        markHoldStarted(target.note.id);
+        getHoldDensityTimes(target.note).forEach((timeMs, tickIndex) => {
+          if (timeMs !== target.note.timeMs) return;
+          const tickId = getHoldTickId(target.note, tickIndex);
+          if (!judgedHoldTickIds.has(tickId)) {
+            startedHoldTickMatches.push({ note: target.note, tickId, result });
+          }
+        });
+        return;
+      }
       unavailableNoteIds.add(target.note.id);
-      matches.push({ note: target.note, result: getJudgeResult(target.offset) });
+      matches.push({ note: target.note, result });
     });
 
     const matchedSpaceLaneIds = new Set<string>();
@@ -935,7 +1013,7 @@ function PlayView({
       matches.push({ note: target.note, result: getJudgeResult(target.offset) });
     });
 
-    if (!matches.length) return;
+    if (!matches.length && !startedHoldTickMatches.length) return;
 
     if (matchedSpaceLaneIds.size) {
       activeSpaceLaneIdsRef.current = [...matchedSpaceLaneIds];
@@ -946,10 +1024,18 @@ function PlayView({
       matches.forEach(({ note }) => next.add(note.id));
       return next;
     });
-    setStats((previous) => applyJudges(previous, matches.map(({ result }) => result), scoreUnit));
-    showJudgeBursts(matches, setJudgeBursts);
+    if (startedHoldTickMatches.length) {
+      setJudgedHoldTickIds((previous) => {
+        const next = new Set(previous);
+        startedHoldTickMatches.forEach(({ tickId }) => next.add(tickId));
+        return next;
+      });
+    }
+    const scoredMatches = [...matches, ...startedHoldTickMatches.map(({ note, result }) => ({ note, result }))];
+    setStats((previous) => applyJudges(previous, scoredMatches.map(({ result }) => result), scoreUnit));
+    showJudgeBursts(scoredMatches, setJudgeBursts);
     const playedKeySounds = new Set<string>();
-    matches.forEach(({ note }) => {
+    scoredMatches.forEach(({ note }) => {
       playHitKeySoundOnce(note, activeLanes, chartLaneIndexById, keyVolume, playedKeySounds);
     });
   }, [
@@ -959,9 +1045,11 @@ function PlayView({
     calibrationSamples,
     chartLaneIndexById,
     isPlaying,
+    judgedHoldTickIds,
     judgedIds,
     judgementWindowNotes,
     keyVolume,
+    markHoldStarted,
     offsetMs,
     onOffsetChange,
     playPhase,
@@ -1118,13 +1206,17 @@ function PlayView({
         return;
       }
 
-      armHoldInputsAt(liveChartMs, code, judgementWindowNotes, activeLanes, chartLaneIndexById, armedHoldInputsRef.current, keyPressTimesRef.current);
       setCurrentMs(liveMs);
       const target = judgementWindowNotes
         .filter((note) => {
           if (judgedIds.has(note.id)) return false;
-          if (note.type === "hold") return false;
           if (isSpaceKey) return false;
+          if (note.type === "hold") {
+            return !note.isSpace
+              && !startedHoldIdsRef.current.has(note.id)
+              && !failedHoldIdsRef.current.has(note.id)
+              && lane?.id === note.laneId;
+          }
           return (
             (spaceInputSide && isSpaceTapSide(note, spaceInputSide) && getSpaceProjection(note, activeLanes, chartLaneIndexById).isJudgeable)
             || (!note.isSpace && note.laneId === lane?.id)
@@ -1136,12 +1228,35 @@ function PlayView({
 
       if (!target) return;
 
+      const result = getJudgeResult(target.offset);
+      if (target.note.type === "hold") {
+        markHoldStarted(target.note.id);
+        const startedTickMatches: Array<{ note: Note; result: JudgeResult; tickId: string }> = [];
+        getHoldDensityTimes(target.note).forEach((timeMs, tickIndex) => {
+          if (timeMs !== target.note.timeMs) return;
+          const tickId = getHoldTickId(target.note, tickIndex);
+          if (!judgedHoldTickIds.has(tickId)) {
+            startedTickMatches.push({ note: target.note, result, tickId });
+          }
+        });
+        if (startedTickMatches.length) {
+          setJudgedHoldTickIds((previous) => {
+            const next = new Set(previous);
+            startedTickMatches.forEach(({ tickId }) => next.add(tickId));
+            return next;
+          });
+          setStats((previous) => applyJudges(previous, startedTickMatches.map(({ result }) => result), scoreUnit));
+          showJudgeBursts(startedTickMatches, setJudgeBursts);
+          playHitKeySound(target.note, activeLanes, chartLaneIndexById, keyVolume);
+        }
+        return;
+      }
+
       if (isSpaceKey || spaceInputSide) {
         const spannedLaneIds = getSpannedLaneIds(target.note, activeLanes, chartLaneIndexById);
         activeSpaceLaneIdsRef.current = spannedLaneIds;
         updateTouchFeedback();
       }
-      const result = getJudgeResult(target.offset);
       setJudgedIds((previous) => new Set(previous).add(target.note.id));
       setStats((previous) => applyJudge(previous, result, scoreUnit));
       showJudgeBurst(target.note, result, setJudgeBursts);
@@ -1152,7 +1267,6 @@ function PlayView({
       const code = normalizeKeyboardEventCode(event);
       if (shouldIgnoreKey(code)) return;
       pressedCodesRef.current.delete(code);
-      armedHoldInputsRef.current.delete(code);
       if (code === "Space" || getSpaceInputSideForCode(code)) {
         activeSpaceLaneIdsRef.current = [];
       }
@@ -1165,7 +1279,7 @@ function PlayView({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [activeLanes, calibrationActive, calibrationLane, calibrationSamples, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedIds, judgementWindowNotes, keyVolume, onOffsetChange, openPauseMenu, playPhase, readPlayheadMs, resumeFromPause, showPauseMenu, stopRaf, togglePlay, scoreUnit, updateTouchFeedback]);
+  }, [activeLanes, calibrationActive, calibrationLane, calibrationSamples, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, markHoldStarted, onOffsetChange, openPauseMenu, playPhase, readPlayheadMs, resumeFromPause, showPauseMenu, stopRaf, togglePlay, scoreUnit, updateTouchFeedback]);
 
   const approachingLaneIds = useMemo(() => {
     const next = new Set<string>();
@@ -1311,7 +1425,7 @@ function PlayView({
                   noteSize={noteSize}
                   timingGroup={getTimingGroupForNote(note, timingGroups)}
                   judged={displayJudgedIds.has(note.id)}
-                  dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, armedHoldInputsRef.current, getTouchHoldSnapshot())}
+                  dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
                 />
               ))}
             </div>
@@ -1326,7 +1440,7 @@ function PlayView({
               laneCount={activeLanes.length}
               projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
               judged={judgedIds.has(note.id)}
-              dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, armedHoldInputsRef.current, getTouchHoldSnapshot())}
+              dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
             />
           ))}
           {visibleLaneEventNotes.map((note) => (
@@ -3747,29 +3861,6 @@ function getHoldInputCodes(
   return lane?.keyCodes ?? [];
 }
 
-function armHoldInputsAt(
-  liveMs: number,
-  code: string,
-  notes: Note[],
-  activeLanes: LaneConfig[],
-  sourceLaneIndexById: Map<string, number>,
-  armedInputs: Map<string, number>,
-  keyPressTimes: Map<string, number>,
-) {
-  const pressMs = keyPressTimes.get(code);
-  if (typeof pressMs !== "number") return;
-  const canArm = notes.some((note) => (
-    note.type === "hold"
-    && !note.isSpace
-    && liveMs >= note.timeMs - HIT_WINDOW_MS
-    && liveMs <= getNoteEndTimeMs(note)
-    && getHoldInputCodes(note, activeLanes, sourceLaneIndexById).includes(code)
-  ));
-  if (canArm) {
-    armedInputs.set(code, pressMs);
-  }
-}
-
 function getTouchHoldInputState(
   note: Note,
   touchInputs: TouchHoldInputSnapshot | undefined,
@@ -3815,9 +3906,7 @@ function getTouchHoldInputState(
 
   const eligibleTouch = laneTouches.find((touch) => {
     const pressMs = touch.lanePressMs;
-    return typeof pressMs === "number"
-      && pressMs >= note.timeMs - HIT_WINDOW_MS
-      && pressMs <= tickTimeMs + HIT_WINDOW_MS;
+    return typeof pressMs === "number" && pressMs <= tickTimeMs + HIT_WINDOW_MS;
   });
 
   return {
@@ -3833,7 +3922,6 @@ function getHoldInputState(
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
   keyPressTimes: Map<string, number>,
-  armedInputs: Map<string, number>,
   tickTimeMs: number,
   currentMs: number,
   touchInputs?: TouchHoldInputSnapshot,
@@ -3863,13 +3951,11 @@ function getHoldInputState(
     };
     return touchState.isEligible ? touchState : keyboardState;
   }
-  const isArmed = typeof pressMs === "number" && armedInputs.get(code) === pressMs;
-  const isInTickWindow = typeof pressMs === "number" && Math.abs(pressMs - tickTimeMs) <= HIT_WINDOW_MS;
   const keyboardState: HoldInputState = {
     code,
     pressMs,
     isHeld: true,
-    isEligible: isArmed || isInTickWindow,
+    isEligible: currentMs <= tickTimeMs + HIT_WINDOW_MS,
   };
   if (keyboardState.isEligible) return keyboardState;
   return touchState.isHeld ? touchState : keyboardState;
@@ -3882,13 +3968,19 @@ function isHoldDimmed(
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
   keyPressTimes: Map<string, number>,
-  armedInputs: Map<string, number>,
+  startedHoldIds: Set<string>,
+  failedHoldIds: Set<string>,
   touchInputs?: TouchHoldInputSnapshot,
 ) {
-  const nextTickTime = getHoldDensityTimes(note).find((timeMs) => timeMs >= currentMs - HIT_WINDOW_MS) ?? getNoteEndTimeMs(note);
-  const input = getHoldInputState(note, pressedCodes, activeLanes, sourceLaneIndexById, keyPressTimes, armedInputs, nextTickTime, currentMs, touchInputs);
-  return note.type === "hold"
-    && currentMs >= note.timeMs
+  if (note.type !== "hold") return false;
+  if (!note.isSpace) {
+    if (failedHoldIds.has(note.id)) return true;
+    if (currentMs > note.timeMs + HIT_WINDOW_MS && !startedHoldIds.has(note.id)) return true;
+  }
+  const nextTickTime = getHoldDensityTimes(note).find((timeMs) => timeMs >= currentMs - HIT_WINDOW_MS);
+  if (nextTickTime === undefined) return false;
+  const input = getHoldInputState(note, pressedCodes, activeLanes, sourceLaneIndexById, keyPressTimes, nextTickTime, currentMs, touchInputs);
+  return currentMs >= note.timeMs
     && currentMs <= getNoteEndTimeMs(note)
     && !input.isEligible;
 }
