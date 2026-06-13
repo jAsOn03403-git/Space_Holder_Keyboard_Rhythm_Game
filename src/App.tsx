@@ -633,9 +633,9 @@ function PlayView({
   }, [resetRun]);
 
   const restartFromPause = useCallback(() => {
-    resetRun({ keepPauseMenu: true });
-    forcedResumeMsRef.current = 0;
-  }, [resetRun]);
+    resetRun();
+    void startPlaybackFrom(0);
+  }, [resetRun, startPlaybackFrom]);
 
   const togglePlay = useCallback(async () => {
     const audio = audioRef.current;
