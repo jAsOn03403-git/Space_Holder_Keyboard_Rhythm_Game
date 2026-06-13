@@ -378,7 +378,6 @@ function PlayView({
   const [startedHoldIds, setStartedHoldIds] = useState<Set<string>>(() => new Set());
   const [failedHoldIds, setFailedHoldIds] = useState<Set<string>>(() => new Set());
   const [activeLaneIds, setActiveLaneIds] = useState<Set<string>>(() => new Set());
-  const [activeSpaceSides, setActiveSpaceSides] = useState<Set<SpaceSide>>(() => new Set());
   const [judgeBursts, setJudgeBursts] = useState<JudgeBurst[]>([]);
   const [stats, setStats] = useState<PlayStats>(INITIAL_STATS);
   const [showPauseMenu, setShowPauseMenu] = useState(false);
@@ -528,10 +527,13 @@ function PlayView({
   ), [activeLanes]);
 
   const updateTouchFeedback = useCallback(() => {
+    if (!pressedCodesRef.current.size && !activeTouchesRef.current.size && !activeSpaceLaneIdsRef.current.length) {
+      setActiveLaneIds(new Set());
+      return;
+    }
     const nextActiveLaneIds = getPressedLaneFeedback(pressedCodesRef.current, activeLanes, activeSpaceLaneIdsRef.current);
     getTouchLaneIds(activeTouchesRef.current).forEach((laneId) => nextActiveLaneIds.add(laneId));
     setActiveLaneIds(nextActiveLaneIds);
-    setActiveSpaceSides(getPressedSpaceSideFeedback(pressedCodesRef.current, activeTouchesRef.current));
   }, [activeLanes]);
 
   const updateTouchLaneState = useCallback((touch: TouchInputState, x: number, y: number, liveChartMs: number): TouchInputState => {
@@ -588,7 +590,6 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
-    setActiveSpaceSides(new Set());
   }, [chart, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   const startGame = useCallback(() => {
@@ -646,7 +647,6 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
-    setActiveSpaceSides(new Set());
     setShowPauseMenu(true);
   }, [clearTouchInputs, readPlayheadMs, stopRaf]);
 
@@ -692,7 +692,6 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
-    setActiveSpaceSides(new Set());
     setCurrentMs(0);
     startAtRef.current = performance.now();
     setIsPlaying(true);
@@ -730,7 +729,6 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
-    setActiveSpaceSides(new Set());
   }, [chart.id, chart.initialLaneCount, chart.laneCount, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   useEffect(() => {
@@ -749,7 +747,6 @@ function PlayView({
     });
     activeSpaceLaneIdsRef.current = [];
     setActiveLaneIds(new Set());
-    setActiveSpaceSides(new Set());
   }, [calibrationActive, chart.laneCount, chart.notes, chartMs, isPlaying, triggeredLaneNoteIds]);
 
   useEffect(() => {
@@ -1116,6 +1113,7 @@ function PlayView({
     }
     if (hadTouch && activeTouchesRef.current.size === 0) {
       lastTouchReleaseMsRef.current = getLiveTimes().liveChartMs;
+      activeSpaceLaneIdsRef.current = [];
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
@@ -1369,7 +1367,7 @@ function PlayView({
       <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={() => setIsPlaying(false)} />
 
       <section
-        className={`stage ${activeSpaceSides.has("left") ? "space-left-active" : ""} ${activeSpaceSides.has("right") ? "space-right-active" : ""}`}
+        className="stage"
         aria-label="Rhythm playfield"
         onPointerDown={handleStagePointerDown}
         onPointerMove={handleStagePointerMove}
@@ -1476,11 +1474,6 @@ function PlayView({
               );
             })()
           ))}
-          {judgeBursts
-            .filter((burst) => burst.spaceSide === "left" || burst.spaceSide === "right")
-            .map((burst) => (
-              <span key={`${burst.id}-side`} className={`side-hit-flash ${burst.spaceSide === "left" ? "left" : "right"}`} />
-            ))}
           <div className="judge-line" />
         </div>
         <KeyboardStrip
@@ -4425,23 +4418,6 @@ function getPressedLaneFeedback(
   });
   extraLaneIds.forEach((laneId) => activeLaneIds.add(laneId));
   return activeLaneIds;
-}
-
-function getPressedSpaceSideFeedback(
-  pressedCodes: Set<string>,
-  activeTouches: Map<number, TouchInputState>,
-) {
-  const activeSides = new Set<SpaceSide>();
-  pressedCodes.forEach((code) => {
-    const side = getSpaceInputSideForCode(code);
-    if (side) activeSides.add(side);
-  });
-  activeTouches.forEach((touch) => {
-    if (touch.laneId) return;
-    const side = getTouchSpaceSide(touch.x);
-    if (side) activeSides.add(side);
-  });
-  return activeSides;
 }
 
 function getSnapMs(bpm: number, division: number) {
