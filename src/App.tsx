@@ -4579,10 +4579,10 @@ function playKeySound(laneIndex: number, isSpace = false, volume = 1, scheduledT
   click.frequency.setValueAtTime(860, now);
 
   mainGain.gain.setValueAtTime(0.0001, now);
-  mainGain.gain.exponentialRampToValueAtTime(0.26 * safeVolume, now + 0.008);
-  mainGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
-  clickGain.gain.setValueAtTime(0.065 * safeVolume, now);
-  clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.025);
+  mainGain.gain.exponentialRampToValueAtTime(0.54 * safeVolume, now + 0.006);
+  mainGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+  clickGain.gain.setValueAtTime(0.16 * safeVolume, now);
+  clickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.03);
 
   oscillator.connect(filter);
   filter.connect(mainGain);
@@ -4619,7 +4619,7 @@ function playFallbackKeySound(laneIndex: number, isSpace = false, volume = 1) {
   const debugWindow = window as Window & { __keyboardBeatFallbackKeyCount?: number };
   debugWindow.__keyboardBeatFallbackKeyCount = (debugWindow.__keyboardBeatFallbackKeyCount ?? 0) + 1;
   markKeySoundBackend("html-audio");
-  audio.volume = Math.max(0, Math.min(1, 0.56 * volume));
+  audio.volume = Math.max(0, Math.min(1, 0.9 * volume));
   void audio.play().catch(() => undefined);
 }
 
@@ -4650,7 +4650,7 @@ function getFallbackKeySoundUrl(laneIndex: number, isSpace = false) {
     const envelope = Math.exp(-t * 24);
     const tone = Math.sin(Math.PI * 2 * baseFrequency * t);
     const click = Math.sin(Math.PI * 2 * 860 * t) * Math.max(0, 1 - t / 0.025);
-    pcm[index] = Math.max(-1, Math.min(1, tone * envelope * 0.46 + click * 0.18)) * 32767;
+    pcm[index] = Math.max(-1, Math.min(1, tone * envelope * 0.72 + click * 0.34)) * 32767;
   }
 
   const url = `data:audio/wav;base64,${encodeWavBase64(pcm, sampleRate)}`;
