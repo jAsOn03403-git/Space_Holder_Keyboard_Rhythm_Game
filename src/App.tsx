@@ -1411,20 +1411,24 @@ function PlayView({
           {activeLanes.map((lane) => (
             <div key={lane.id} className={`lane ${activeLaneIds.has(lane.id) ? "lane-active" : ""} ${approachingSpaceLaneIds.has(lane.id) ? "lane-space-ready" : ""}`}>
               <div className="lane-glow" />
-              {(visibleTapNotesByLane.get(lane.id) ?? []).map((note) => (
-                <NoteBlock
-                  key={note.id}
-                  note={note}
-                  currentMs={chartMs}
-                  fallMs={fallMs}
-                  noteSize={noteSize}
-                  timingGroup={getTimingGroupForNote(note, timingGroups)}
-                  judged={displayJudgedIds.has(note.id)}
-                  caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
-                  dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
-                />
-              ))}
             </div>
+          ))}
+          {activeLanes.flatMap((lane, laneIndex) => (
+            (visibleTapNotesByLane.get(lane.id) ?? []).map((note) => (
+              <NoteBlock
+                key={note.id}
+                note={note}
+                currentMs={chartMs}
+                fallMs={fallMs}
+                laneIndex={laneIndex}
+                laneCount={activeLanes.length}
+                noteSize={noteSize}
+                timingGroup={getTimingGroupForNote(note, timingGroups)}
+                judged={displayJudgedIds.has(note.id)}
+                caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
+                dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
+              />
+            ))
           ))}
           {visibleSpaceNoteList.map((note) => (
             <SpaceNoteBlock
@@ -3119,6 +3123,8 @@ function NoteBlock({
   note,
   currentMs,
   fallMs,
+  laneIndex,
+  laneCount,
   noteSize,
   timingGroup,
   judged,
@@ -3128,6 +3134,8 @@ function NoteBlock({
   note: Note;
   currentMs: number;
   fallMs: number;
+  laneIndex: number;
+  laneCount: number;
   noteSize: number;
   timingGroup: TimingGroup;
   judged: boolean;
@@ -3135,14 +3143,16 @@ function NoteBlock({
   dimmed: boolean;
 }) {
   const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
-  const placement = getNotePlacement(0, 1, 1, false, noteSize);
+  const placement = getNotePlacement(laneIndex, laneCount, 1, false, noteSize);
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (dimmed ? 0.42 : 1);
 
   return (
     <span
       className={`note-block ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""}`}
       style={{
-        ...(note.type === "hold" ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught) : { top: `${top}%` }),
+        ...(note.type === "hold"
+          ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught)
+          : { top: `${top}%`, left: `${placement.left}%`, width: `${placement.width}%` }),
         opacity,
       }}
     />

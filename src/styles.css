@@ -554,7 +554,7 @@ button.primary {
 
 .lane {
   position: relative;
-  z-index: auto;
+  z-index: 0;
   min-width: 0;
   overflow: visible;
   border-left: 1px solid rgba(255, 255, 255, 0.08);
