@@ -1425,6 +1425,7 @@ function PlayView({
                   noteSize={noteSize}
                   timingGroup={getTimingGroupForNote(note, timingGroups)}
                   judged={displayJudgedIds.has(note.id)}
+                  caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
                   dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
                 />
               ))}
@@ -1440,6 +1441,7 @@ function PlayView({
               laneCount={activeLanes.length}
               projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
               judged={judgedIds.has(note.id)}
+              caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
               dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
             />
           ))}
@@ -3125,6 +3127,7 @@ function NoteBlock({
   noteSize,
   timingGroup,
   judged,
+  caught,
   dimmed,
 }: {
   note: Note;
@@ -3133,6 +3136,7 @@ function NoteBlock({
   noteSize: number;
   timingGroup: TimingGroup;
   judged: boolean;
+  caught: boolean;
   dimmed: boolean;
 }) {
   const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
@@ -3143,7 +3147,7 @@ function NoteBlock({
     <span
       className={`note-block ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""}`}
       style={{
-        ...(note.type === "hold" ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup) : { top: `${top}%` }),
+        ...(note.type === "hold" ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught) : { top: `${top}%` }),
         opacity,
       }}
     />
@@ -3158,6 +3162,7 @@ function SpaceNoteBlock({
   laneCount,
   projection,
   judged,
+  caught,
   dimmed,
 }: {
   note: Note;
@@ -3167,6 +3172,7 @@ function SpaceNoteBlock({
   laneCount: number;
   projection: SpaceProjection;
   judged: boolean;
+  caught: boolean;
   dimmed: boolean;
 }) {
   const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
@@ -3174,7 +3180,7 @@ function SpaceNoteBlock({
   const isGhostSpace = !projection.isJudgeable;
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (isGhostSpace ? 0.32 : dimmed ? 0.42 : 1);
   const style = note.type === "hold"
-    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup)
+    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught)
     : {
       top: `${top}%`,
       left: `${placement.left}%`,
@@ -3668,6 +3674,12 @@ function getHoldTickId(note: Note, tickIndex: number) {
   return `${note.id}:hold:${tickIndex}`;
 }
 
+function isHoldVisuallyCaught(note: Note, startedHoldIds: Set<string>, judgedHoldTickIds: Set<string>) {
+  if (note.type !== "hold") return false;
+  if (!note.isSpace && startedHoldIds.has(note.id)) return true;
+  return getHoldDensityTimes(note).some((_, tickIndex) => judgedHoldTickIds.has(getHoldTickId(note, tickIndex)));
+}
+
 function getPlayHoldStyle(
   note: Note,
   headTop: number,
@@ -3675,14 +3687,18 @@ function getPlayHoldStyle(
   fallMs: number,
   placement: { left: number; width: number },
   timingGroup?: TimingGroup,
+  caught = false,
 ): CSSProperties {
-  const tailTop = getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup);
-  const top = Math.min(headTop, tailTop);
+  const rawTailTop = getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup);
+  const clampedHeadTop = caught && currentMs >= note.timeMs
+    ? Math.min(headTop, JUDGE_LINE_PERCENT)
+    : headTop;
+  const top = Math.min(clampedHeadTop, rawTailTop);
   return {
     top: `${top}%`,
     left: `${placement.left}%`,
     width: `${placement.width}%`,
-    height: `${Math.max(1.1, Math.abs(tailTop - headTop))}%`,
+    height: `${Math.max(1.1, Math.abs(rawTailTop - clampedHeadTop))}%`,
     transform: "none",
   };
 }
