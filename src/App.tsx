@@ -25,6 +25,7 @@ const HIT_WINDOW_MS = 180;
 const MAX_SCORE = 10_000_000;
 const KEY_SOUND_LOOKAHEAD_MS = 90;
 const TOUCH_SPACE_GRACE_MS = 100;
+const PLAY_PREROLL_MS = 700;
 const TOUCH_LEFT_ZONE_RATIO = 0.47;
 const TOUCH_RIGHT_ZONE_RATIO = 0.53;
 const CALIBRATION_TAP_COUNT = 15;
@@ -378,7 +379,7 @@ function PlayView({
   onAutoplayChange: (enabled: boolean) => void;
 }) {
   const [playPhase, setPlayPhase] = useState<PlayPhase>("menu");
-  const [menuStatus, setMenuStatus] = useState("导入音频、曲绘和 JSON 后开始游玩");
+  const [menuStatus, setMenuStatus] = useState("导入包含音乐和曲绘的 JSON 后开始游玩");
   const playAudioInputRef = useRef<HTMLInputElement | null>(null);
   const playArtworkInputRef = useRef<HTMLInputElement | null>(null);
   const playChartInputRef = useRef<HTMLInputElement | null>(null);
@@ -400,6 +401,8 @@ function PlayView({
   const musicGainRef = useRef<GainNode | null>(null);
   const currentMsRef = useRef(0);
   const playbackActiveRef = useRef(false);
+  const playbackTokenRef = useRef(0);
+  const audioStartPendingRef = useRef(false);
   const startAtRef = useRef(0);
   const animationRef = useRef<number | null>(null);
   const pressedCodesRef = useRef<Set<string>>(new Set());
@@ -407,6 +410,7 @@ function PlayView({
   const armedHoldInputsRef = useRef<Map<string, number>>(new Map());
   const startedTapHoldIdsRef = useRef<Set<string>>(new Set());
   const failedTapHoldIdsRef = useRef<Set<string>>(new Set());
+  const caughtSpaceHoldIdsRef = useRef<Set<string>>(new Set());
   const activeSpaceLaneIdsRef = useRef<string[]>([]);
   const laneFieldRef = useRef<HTMLDivElement | null>(null);
   const activeTouchesRef = useRef<Map<number, TouchInputState>>(new Map());
@@ -415,14 +419,19 @@ function PlayView({
   const lastTouchReleaseMsRef = useRef<number | null>(null);
 
   const chartDuration = chart.meta.durationMs;
+  const playDuration = chartDuration + PLAY_PREROLL_MS;
   const calibrationDurationMs = CALIBRATION_FIRST_TAP_MS + (CALIBRATION_TAP_COUNT - 1) * CALIBRATION_INTERVAL_MS + 1600;
   const fallMs = BASE_FALL_MS / noteSpeed;
-  const chartMs = calibrationActive ? currentMs : currentMs - offsetMs;
+  const chartMs = calibrationActive ? currentMs : currentMs - PLAY_PREROLL_MS - offsetMs;
   const activeLanes = useMemo(
     () => getActiveLaneSlice(chart.lanes, currentLaneCount),
     [chart.lanes, currentLaneCount],
   );
   const timingGroups = useMemo(() => getTimingGroups(chart), [chart]);
+  const noteDisplayOrder = useMemo(
+    () => new Map(chart.notes.map((note, index) => [note.id, index])),
+    [chart.notes],
+  );
   const keyboardSegments = useMemo(() => getKeyboardSegments(activeLanes), [activeLanes]);
   const chartLaneIndexById = useMemo(
     () => new Map(chart.lanes.map((lane, index) => [lane.id, index])),
@@ -491,19 +500,55 @@ function PlayView({
   const readPlayheadMs = useCallback(() => {
     const audio = audioRef.current;
     const next = audio && !audio.paused
-      ? audio.currentTime * 1000
+      ? audio.currentTime * 1000 + (calibrationActive ? 0 : PLAY_PREROLL_MS)
       : playbackActiveRef.current
         ? performance.now() - startAtRef.current
         : currentMsRef.current;
-    return Math.min(calibrationActive ? calibrationDurationMs : chartDuration, Math.max(0, next));
-  }, [calibrationActive, calibrationDurationMs, chartDuration]);
+    return Math.min(calibrationActive ? calibrationDurationMs : playDuration, Math.max(0, next));
+  }, [calibrationActive, calibrationDurationMs, playDuration]);
+
+  const startAudioForTimeline = useCallback(async (timelineMs: number, token: number) => {
+    const audio = audioRef.current;
+    if (!audio) return true;
+    unlockAudioForPlayback(audio, musicVolume);
+    const audioMs = calibrationActive ? timelineMs : Math.max(0, timelineMs - PLAY_PREROLL_MS);
+    audio.currentTime = audioMs / 1000;
+    try {
+      await audio.play();
+    } catch {
+      return playbackTokenRef.current === token && !audio.paused;
+    }
+    if (playbackTokenRef.current !== token) {
+      audio.pause();
+      return false;
+    }
+    return true;
+  }, [calibrationActive, musicVolume]);
 
   const tick = useCallback(() => {
     const next = readPlayheadMs();
     currentMsRef.current = next;
     setCurrentMs(next);
+    const shouldStartAudio = !calibrationActive
+      && playbackActiveRef.current
+      && next >= PLAY_PREROLL_MS
+      && audioRef.current
+      && audioRef.current.paused
+      && !audioStartPendingRef.current;
+    if (shouldStartAudio) {
+      const token = playbackTokenRef.current;
+      audioStartPendingRef.current = true;
+      void startAudioForTimeline(next, token).then((started) => {
+        audioStartPendingRef.current = false;
+        if (!started && playbackTokenRef.current === token) {
+          playbackActiveRef.current = false;
+          setIsPlaying(false);
+          stopRaf();
+        }
+      });
+    }
     animationRef.current = requestAnimationFrame(tick);
-  }, [readPlayheadMs]);
+  }, [calibrationActive, readPlayheadMs, startAudioForTimeline, stopRaf]);
 
   useEffect(() => {
     currentMsRef.current = currentMs;
@@ -596,12 +641,16 @@ function PlayView({
     setCurrentLaneCount(getInitialLaneCount(chart));
     startedTapHoldIdsRef.current.clear();
     failedTapHoldIdsRef.current.clear();
+    caughtSpaceHoldIdsRef.current.clear();
     setStats(INITIAL_STATS);
     setJudgeBursts([]);
   }, [chart]);
 
   const startPlaybackAt = useCallback(async (timeMs: number) => {
-    const resumeMs = Math.min(chartDuration, Math.max(0, timeMs));
+    const resumeMs = Math.min(playDuration, Math.max(0, timeMs));
+    const token = playbackTokenRef.current + 1;
+    playbackTokenRef.current = token;
+    audioStartPendingRef.current = false;
     const audio = audioRef.current;
     unlockAudioForPlayback(audio, musicVolume);
     if (resumeMs <= 0) {
@@ -610,28 +659,30 @@ function PlayView({
     currentMsRef.current = resumeMs;
     setCurrentMs(resumeMs);
     setShowPauseMenu(false);
-    let canAdvance = !audio;
     if (audio) {
-      audio.currentTime = resumeMs / 1000;
-      await audio.play().then(() => {
-        canAdvance = true;
-      }).catch(() => {
-        canAdvance = !audio.paused;
-      });
-    }
-    if (!canAdvance) {
-      playbackActiveRef.current = false;
-      setIsPlaying(false);
-      return;
+      audio.pause();
+      audio.currentTime = Math.max(0, resumeMs - PLAY_PREROLL_MS) / 1000;
     }
     startAtRef.current = performance.now() - resumeMs;
     playbackActiveRef.current = true;
     setIsPlaying(true);
     stopRaf();
     animationRef.current = requestAnimationFrame(tick);
-  }, [chartDuration, musicVolume, resetJudgementState, stopRaf, tick]);
+    if (resumeMs >= PLAY_PREROLL_MS) {
+      audioStartPendingRef.current = true;
+      const started = await startAudioForTimeline(resumeMs, token);
+      audioStartPendingRef.current = false;
+      if (!started && playbackTokenRef.current === token) {
+        playbackActiveRef.current = false;
+        setIsPlaying(false);
+        stopRaf();
+      }
+    }
+  }, [musicVolume, playDuration, resetJudgementState, startAudioForTimeline, stopRaf, tick]);
 
   const resetRun = useCallback(() => {
+    playbackTokenRef.current += 1;
+    audioStartPendingRef.current = false;
     stopRaf();
     playbackActiveRef.current = false;
     setIsPlaying(false);
@@ -652,7 +703,8 @@ function PlayView({
   const startGame = useCallback(() => {
     resetRun();
     setPlayPhase("game");
-  }, [resetRun]);
+    void startPlaybackAt(0);
+  }, [resetRun, startPlaybackAt]);
 
   const returnToMenu = useCallback(() => {
     resetRun();
@@ -669,9 +721,9 @@ function PlayView({
       pausePlayback();
       return;
     }
-    const resumeMs = currentMsRef.current >= chartDuration - 100 ? 0 : currentMsRef.current;
+    const resumeMs = currentMsRef.current >= playDuration - 100 ? 0 : currentMsRef.current;
     await startPlaybackAt(resumeMs);
-  }, [chartDuration, isPlaying, pausePlayback, startPlaybackAt]);
+  }, [isPlaying, pausePlayback, playDuration, startPlaybackAt]);
 
   const openPauseMenu = useCallback(() => {
     const liveMs = readPlayheadMs();
@@ -689,18 +741,21 @@ function PlayView({
   }, [pausePlayback, showPauseMenu]);
 
   useEffect(() => {
-    const durationMs = calibrationActive ? calibrationDurationMs : chartDuration;
+    const durationMs = calibrationActive ? calibrationDurationMs : playDuration;
     if (!isPlaying || currentMs < durationMs) return;
     stopRaf();
     setIsPlaying(false);
     playbackActiveRef.current = false;
+    playbackTokenRef.current += 1;
     audioRef.current?.pause();
     if (calibrationActive) {
       setCalibrationActive(false);
     }
-  }, [calibrationActive, calibrationDurationMs, chartDuration, currentMs, isPlaying, stopRaf]);
+  }, [calibrationActive, calibrationDurationMs, currentMs, isPlaying, playDuration, stopRaf]);
 
   const startCalibration = useCallback(() => {
+    playbackTokenRef.current += 1;
+    audioStartPendingRef.current = false;
     stopRaf();
     audioRef.current?.pause();
     playbackActiveRef.current = true;
@@ -907,6 +962,9 @@ function PlayView({
         armedHoldInputsRef.current.set(input.code, input.pressMs);
       }
       if (input.isEligible) {
+        if (note.isSpace) {
+          caughtSpaceHoldIdsRef.current.add(note.id);
+        }
         playHitKeySoundOnce(note, activeLanes, chartLaneIndexById, keyVolume, playedKeySounds);
       }
     });
@@ -937,6 +995,30 @@ function PlayView({
       });
     }
   }, [activeLanes, autoplay, calibrationActive, chart.lanes.length, chartLaneIndexById, chartMs, getTouchHoldSnapshot, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, scoreUnit]);
+
+  useEffect(() => {
+    if (!isPlaying || calibrationActive) return;
+    judgementWindowNotes.forEach((note) => {
+      if (note.type !== "hold" || !note.isSpace || caughtSpaceHoldIdsRef.current.has(note.id)) return;
+      if (chartMs < note.timeMs || chartMs > getNoteEndTimeMs(note)) return;
+      const input = autoplay
+        ? { isHeld: true, isEligible: true }
+        : getHoldInputState(
+          note,
+          pressedCodesRef.current,
+          activeLanes,
+          chartLaneIndexById,
+          keyPressTimesRef.current,
+          armedHoldInputsRef.current,
+          note.timeMs,
+          chartMs,
+          getTouchHoldSnapshot(),
+        );
+      if (input.isHeld || input.isEligible) {
+        caughtSpaceHoldIdsRef.current.add(note.id);
+      }
+    });
+  }, [activeLanes, autoplay, calibrationActive, chartLaneIndexById, chartMs, getTouchHoldSnapshot, isPlaying, judgementWindowNotes]);
 
   const processTouchStartBatch = useCallback(() => {
     touchBatchRafRef.current = null;
@@ -1384,8 +1466,6 @@ function PlayView({
   if (playPhase === "menu") {
     return (
       <section className="play-menu-screen">
-        <input ref={playAudioInputRef} hidden type="file" accept={AUDIO_FILE_ACCEPT} onChange={handlePlayAudio} />
-        <input ref={playArtworkInputRef} hidden type="file" accept="image/*" onChange={handlePlayArtwork} />
         <input ref={playChartInputRef} hidden type="file" accept="application/json" onChange={handlePlayChart} />
         <div className="play-menu-hero">
           <div className="play-menu-song">
@@ -1397,8 +1477,6 @@ function PlayView({
             </div>
           </div>
           <div className="play-menu-actions">
-            <button className="primary" onClick={() => playAudioInputRef.current?.click()}>Import Audio</button>
-            <button onClick={() => playArtworkInputRef.current?.click()}>Upload Artwork</button>
             <button onClick={() => playChartInputRef.current?.click()}>Import JSON</button>
             <button className="primary play-start-button" onClick={startGame}>Play</button>
           </div>
@@ -1427,7 +1505,15 @@ function PlayView({
 
   return (
     <section className="play-screen">
-      <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={() => setIsPlaying(false)} />
+      <audio
+        ref={audioRef}
+        src={chart.meta.audioUrl}
+        onEnded={() => {
+          playbackTokenRef.current += 1;
+          playbackActiveRef.current = false;
+          setIsPlaying(false);
+        }}
+      />
 
       <section
         className="stage"
@@ -1448,7 +1534,7 @@ function PlayView({
             <strong>{formatScore(stats.score)}</strong>
           </div>
           <div className="song-progress" aria-label="Song progress">
-            <span style={{ width: `${chartDuration > 0 ? Math.min(100, Math.max(0, (currentMs / chartDuration) * 100)) : 0}%` }} />
+            <span style={{ width: `${chartDuration > 0 ? Math.min(100, Math.max(0, ((currentMs - PLAY_PREROLL_MS) / chartDuration) * 100)) : 0}%` }} />
           </div>
           <div className="song-info-row">
             <img src={chart.meta.coverUrl || "/cover.svg"} alt="" />
@@ -1480,6 +1566,7 @@ function PlayView({
                   fallMs={fallMs}
                   noteSize={noteSize}
                   timingGroup={getTimingGroupForNote(note, timingGroups)}
+                  zIndex={getNoteDisplayZIndex(note, noteDisplayOrder)}
                   judged={displayJudgedIds.has(note.id)}
                   locked={note.type === "hold" && startedTapHoldIdsRef.current.has(note.id) && !failedTapHoldIdsRef.current.has(note.id)}
                   dimmed={(note.type === "hold" && failedTapHoldIdsRef.current.has(note.id)) || isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, armedHoldInputsRef.current, getTouchHoldSnapshot())}
@@ -1494,9 +1581,11 @@ function PlayView({
               currentMs={chartMs}
               fallMs={fallMs}
               timingGroup={getTimingGroupForNote(note, timingGroups)}
+              zIndex={getNoteDisplayZIndex(note, noteDisplayOrder)}
               laneCount={activeLanes.length}
               projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
               judged={judgedIds.has(note.id)}
+              locked={note.type === "hold" && caughtSpaceHoldIdsRef.current.has(note.id)}
               dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, armedHoldInputsRef.current, getTouchHoldSnapshot())}
             />
           ))}
@@ -1507,6 +1596,7 @@ function PlayView({
               currentMs={chartMs}
               fallMs={fallMs}
               timingGroup={getTimingGroupForNote(note, timingGroups)}
+              zIndex={getNoteDisplayZIndex(note, noteDisplayOrder)}
               laneCount={activeLanes.length}
               maxLaneCount={chart.laneCount}
             />
@@ -2026,7 +2116,7 @@ function EditorView({
     if (!copied.length) return;
     onChartChange({
       ...chart,
-      notes: [...chart.notes, ...copied].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId)),
+      notes: [...chart.notes, ...copied],
     });
     setSelectedNoteIds(new Set(copied.map((note) => note.id)));
     setSelectionRange({ startMs: startMs + offsetMs, endMs: endMs + offsetMs });
@@ -2064,7 +2154,7 @@ function EditorView({
       notes: [
         ...chart.notes.filter((note) => !splitTargetIds.has(note.id)),
         ...created,
-      ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId)),
+      ],
     });
     setSelectedNoteIds(new Set(created.map((note) => note.id)));
     if (created.length) {
@@ -2082,11 +2172,9 @@ function EditorView({
     const laneIndexById = new Map(chart.lanes.map((lane, index) => [lane.id, index]));
     onChartChange({
       ...chart,
-      notes: chart.notes
-        .map((note) => selectedNoteIds.has(note.id)
-          ? shiftNoteLane({ ...note, timeMs: snapTime(note.timeMs + deltaMs, snapMs, chart.meta.durationMs) }, chart.lanes, laneIndexById, laneDelta)
-          : note)
-        .sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId)),
+      notes: chart.notes.map((note) => selectedNoteIds.has(note.id)
+        ? shiftNoteLane({ ...note, timeMs: snapTime(note.timeMs + deltaMs, snapMs, chart.meta.durationMs) }, chart.lanes, laneIndexById, laneDelta)
+        : note),
     });
     if (selectionRange) {
       setSelectionRange({
@@ -2149,7 +2237,7 @@ function EditorView({
           holdDensity: safeHoldDensity,
           holdDensityPosition: isHold && isSpace ? holdDensityPosition : undefined,
         },
-      ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId));
+      ];
 
     if (safeHoldDurationMs) {
       setHoldDurationMs(safeHoldDurationMs);
@@ -2180,7 +2268,7 @@ function EditorView({
           targetLaneCount: safeTargetCount,
           timingGroupId: activeTimingGroupId,
         },
-      ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId));
+      ];
 
     setSelectedNoteIds(new Set());
     setSelectionRange(null);
@@ -2878,6 +2966,10 @@ function Timeline({
     [displayLanes],
   );
   const timingGroups = useMemo(() => getTimingGroups(chart), [chart]);
+  const noteDisplayOrder = useMemo(
+    () => new Map(chart.notes.map((note, index) => [note.id, index])),
+    [chart.notes],
+  );
   const previewTimingGroup = getTimingGroupById(timingGroups, activeTimingGroupId);
   const selectionHeadLaneIndex = useMemo(() => {
     const selectedVisibleNotes = chart.notes.filter((note) => selectedNoteIds.has(note.id) && isNoteVisibleOnLanes(note, displayLanes));
@@ -3091,6 +3183,7 @@ function Timeline({
           const noteStyle = {
             ...getEditorNoteStyle(displayNote, top, editTimeMs, fallMs, placement, timingGroup),
             opacity: getTimingOpacity(timingGroup, editTimeMs) * (isGhostSpace ? 0.32 : 1),
+            zIndex: getNoteDisplayZIndex(note, noteDisplayOrder),
           };
           return (
             <span
@@ -3186,6 +3279,7 @@ function NoteBlock({
   fallMs,
   noteSize,
   timingGroup,
+  zIndex,
   judged,
   locked,
   dimmed,
@@ -3195,6 +3289,7 @@ function NoteBlock({
   fallMs: number;
   noteSize: number;
   timingGroup: TimingGroup;
+  zIndex: number;
   judged: boolean;
   locked: boolean;
   dimmed: boolean;
@@ -3212,6 +3307,7 @@ function NoteBlock({
       style={{
         ...style,
         opacity,
+        zIndex,
       }}
     />
   );
@@ -3222,18 +3318,22 @@ function SpaceNoteBlock({
   currentMs,
   fallMs,
   timingGroup,
+  zIndex,
   laneCount,
   projection,
   judged,
+  locked,
   dimmed,
 }: {
   note: Note;
   currentMs: number;
   fallMs: number;
   timingGroup: TimingGroup;
+  zIndex: number;
   laneCount: number;
   projection: SpaceProjection;
   judged: boolean;
+  locked: boolean;
   dimmed: boolean;
 }) {
   const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
@@ -3241,7 +3341,7 @@ function SpaceNoteBlock({
   const isGhostSpace = !projection.isJudgeable;
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (isGhostSpace ? 0.32 : dimmed ? 0.42 : 1);
   const style = note.type === "hold"
-    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup)
+    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, locked)
     : {
       top: `${top}%`,
       left: `${placement.left}%`,
@@ -3251,7 +3351,7 @@ function SpaceNoteBlock({
   return (
     <span
       className={`note-block space-note ${getSpaceSideClass(note)} ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSpace ? "ghost-space" : ""}`}
-      style={{ ...style, opacity }}
+      style={{ ...style, opacity, zIndex }}
     />
   );
 }
@@ -3261,6 +3361,7 @@ function LaneEventBlock({
   currentMs,
   fallMs,
   timingGroup,
+  zIndex,
   laneCount,
   maxLaneCount,
 }: {
@@ -3268,6 +3369,7 @@ function LaneEventBlock({
   currentMs: number;
   fallMs: number;
   timingGroup: TimingGroup;
+  zIndex: number;
   laneCount: number;
   maxLaneCount: number;
 }) {
@@ -3281,6 +3383,7 @@ function LaneEventBlock({
         left: `${placement.left}%`,
         width: `${placement.width}%`,
         opacity: getTimingOpacity(timingGroup, currentMs),
+        zIndex,
       }}
     />
   );
@@ -3716,6 +3819,10 @@ function getTimingOpacity(group: TimingGroup | undefined, currentMs: number) {
 
 function getNoteEndTimeMs(note: Note) {
   return note.type === "hold" ? note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS) : note.timeMs;
+}
+
+function getNoteDisplayZIndex(note: Note, noteDisplayOrder: Map<string, number>) {
+  return 20 + (noteDisplayOrder.get(note.id) ?? 0);
 }
 
 function getHoldDensityTimes(note: Note) {
