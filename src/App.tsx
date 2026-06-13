@@ -801,11 +801,6 @@ function PlayView({
       getHoldDensityTimes(note).map((_, tickIndex) => ({ note, tickId: getHoldTickId(note, tickIndex) }))
     ));
     failedStarts.forEach((note) => markHoldFailed(note.id));
-    setJudgedIds((previous) => {
-      const next = new Set(previous);
-      failedStarts.forEach((note) => next.add(note.id));
-      return next;
-    });
     if (missedTicks.length) {
       setJudgedHoldTickIds((previous) => {
         const next = new Set(previous);
