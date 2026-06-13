@@ -389,6 +389,8 @@ function PlayView({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const startAtRef = useRef(0);
   const animationRef = useRef<number | null>(null);
+  const pendingGameStartRef = useRef(false);
+  const forcedResumeMsRef = useRef<number | null>(null);
   const pressedCodesRef = useRef<Set<string>>(new Set());
   const keyPressTimesRef = useRef<Map<string, number>>(new Map());
   const startedHoldIdsRef = useRef<Set<string>>(new Set());
@@ -475,10 +477,13 @@ function PlayView({
   }, []);
 
   const readPlayheadMs = useCallback(() => {
+    if (animationRef.current === null) {
+      return Math.min(calibrationActive ? calibrationDurationMs : chartDuration, Math.max(0, currentMs));
+    }
     const audio = audioRef.current;
-    const next = audio && !audio.paused ? audio.currentTime * 1000 : performance.now() - startAtRef.current;
+    const next = audio ? audio.currentTime * 1000 : performance.now() - startAtRef.current;
     return Math.min(calibrationActive ? calibrationDurationMs : chartDuration, Math.max(0, next));
-  }, [calibrationActive, calibrationDurationMs, chartDuration]);
+  }, [calibrationActive, calibrationDurationMs, chartDuration, currentMs]);
 
   const tick = useCallback(() => {
     setCurrentMs(readPlayheadMs());
@@ -566,10 +571,10 @@ function PlayView({
     spaceGraceMs: TOUCH_SPACE_GRACE_MS,
   }), []);
 
-  const resetRun = useCallback(() => {
+  const resetRun = useCallback((options?: { keepPauseMenu?: boolean }) => {
     stopRaf();
     setIsPlaying(false);
-    setShowPauseMenu(false);
+    setShowPauseMenu(Boolean(options?.keepPauseMenu));
     setCalibrationActive(false);
     setCalibrationSamples([]);
     setCurrentMs(0);
@@ -580,11 +585,13 @@ function PlayView({
     setCurrentLaneCount(getInitialLaneCount(chart));
     setStats(INITIAL_STATS);
     setJudgeBursts([]);
+    forcedResumeMsRef.current = 0;
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
       audio.currentTime = 0;
     }
+    startAtRef.current = performance.now();
     pressedCodesRef.current.clear();
     keyPressTimesRef.current.clear();
     activeSpaceLaneIdsRef.current = [];
@@ -592,8 +599,31 @@ function PlayView({
     setActiveLaneIds(new Set());
   }, [chart, clearHoldRunState, clearTouchInputs, stopRaf]);
 
+  const startPlaybackFrom = useCallback(async (timeMs: number) => {
+    forcedResumeMsRef.current = null;
+    const safeMs = Math.min(chartDuration, Math.max(0, Math.round(timeMs)));
+    stopRaf();
+    setShowPauseMenu(false);
+    setCurrentMs(safeMs);
+    const audio = audioRef.current;
+    let didStart = !audio;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = safeMs / 1000;
+      didStart = await audio.play().then(() => true).catch(() => false);
+    }
+    startAtRef.current = performance.now() - safeMs;
+    if (!didStart) {
+      setIsPlaying(false);
+      return;
+    }
+    setIsPlaying(true);
+    animationRef.current = requestAnimationFrame(tick);
+  }, [chartDuration, stopRaf, tick]);
+
   const startGame = useCallback(() => {
     resetRun();
+    pendingGameStartRef.current = true;
     setPlayPhase("game");
   }, [resetRun]);
 
@@ -603,7 +633,8 @@ function PlayView({
   }, [resetRun]);
 
   const restartFromPause = useCallback(() => {
-    resetRun();
+    resetRun({ keepPauseMenu: true });
+    forcedResumeMsRef.current = 0;
   }, [resetRun]);
 
   const togglePlay = useCallback(async () => {
@@ -611,9 +642,12 @@ function PlayView({
     const resumeMs = currentMs >= chartDuration - 100 ? 0 : currentMs;
 
     if (isPlaying) {
+      const liveMs = readPlayheadMs();
       stopRaf();
       setIsPlaying(false);
       audio?.pause();
+      if (audio) audio.currentTime = liveMs / 1000;
+      setCurrentMs(liveMs);
       return;
     }
 
@@ -626,15 +660,8 @@ function PlayView({
       setStats(INITIAL_STATS);
     }
 
-    if (audio) {
-      audio.currentTime = resumeMs / 1000;
-      await audio.play().catch(() => undefined);
-    }
-
-    startAtRef.current = performance.now() - resumeMs;
-    setIsPlaying(true);
-    animationRef.current = requestAnimationFrame(tick);
-  }, [chart, chartDuration, currentMs, isPlaying, stopRaf, tick]);
+    await startPlaybackFrom(resumeMs);
+  }, [chart, chartDuration, currentMs, isPlaying, readPlayheadMs, startPlaybackFrom, stopRaf]);
 
   const openPauseMenu = useCallback(() => {
     const liveMs = readPlayheadMs();
@@ -650,10 +677,23 @@ function PlayView({
     setShowPauseMenu(true);
   }, [clearTouchInputs, readPlayheadMs, stopRaf]);
 
+  const handleAudioEnded = useCallback(() => {
+    stopRaf();
+    setIsPlaying(false);
+    setCurrentMs(chartDuration);
+    audioRef.current?.pause();
+  }, [chartDuration, stopRaf]);
+
   const resumeFromPause = useCallback(() => {
-    setShowPauseMenu(false);
-    void togglePlay();
-  }, [togglePlay]);
+    const resumeMs = forcedResumeMsRef.current ?? (currentMs >= chartDuration - 100 ? 0 : currentMs);
+    void startPlaybackFrom(resumeMs);
+  }, [chartDuration, currentMs, startPlaybackFrom]);
+
+  useEffect(() => {
+    if (playPhase !== "game" || !pendingGameStartRef.current) return;
+    pendingGameStartRef.current = false;
+    void startPlaybackFrom(0);
+  }, [playPhase, startPlaybackFrom]);
 
   useEffect(() => {
     if (!showPauseMenu) return;
@@ -1364,7 +1404,7 @@ function PlayView({
 
   return (
     <section className="play-screen">
-      <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={() => setIsPlaying(false)} />
+      <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={handleAudioEnded} />
 
       <section
         className="stage"
