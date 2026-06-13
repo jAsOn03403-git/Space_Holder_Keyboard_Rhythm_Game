@@ -369,9 +369,7 @@ function PlayView({
   onAutoplayChange: (enabled: boolean) => void;
 }) {
   const [playPhase, setPlayPhase] = useState<PlayPhase>("menu");
-  const [menuStatus, setMenuStatus] = useState("导入音频、曲绘和 JSON 后开始游玩");
-  const playAudioInputRef = useRef<HTMLInputElement | null>(null);
-  const playArtworkInputRef = useRef<HTMLInputElement | null>(null);
+  const [menuStatus, setMenuStatus] = useState("导入 JSON 谱面后开始游玩");
   const playChartInputRef = useRef<HTMLInputElement | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentMs, setCurrentMs] = useState(0);
@@ -1190,48 +1188,6 @@ function PlayView({
   }, [activeLanes, chartLaneIndexById, chartMs, judgedIds, visiblePlayableNotes]);
   const displayJudgedIds = calibrationActive ? calibrationHitIds : judgedIds;
 
-  const handlePlayAudio = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    setMenuStatus("正在读取音频...");
-    const audioUrl = await readFileAsDataUrl(file);
-    const parsedMeta = parseAudioFileName(file.name);
-    const embeddedCoverUrl = await readEmbeddedArtwork(file);
-    const durationMs = await readAudioDurationMs(audioUrl).catch(() => chart.meta.durationMs);
-    const shouldUseFileMeta = chart.notes.length === 0;
-    onChartChange({
-      ...chart,
-      meta: {
-        ...chart.meta,
-        title: shouldUseFileMeta ? parsedMeta.title : chart.meta.title,
-        artist: shouldUseFileMeta ? parsedMeta.artist : chart.meta.artist,
-        durationMs,
-        audioUrl,
-        audioFileName: file.name,
-        coverUrl: embeddedCoverUrl ?? chart.meta.coverUrl,
-      },
-    });
-    setMenuStatus(`已导入音频 ${file.name}${embeddedCoverUrl ? " · 已读取内嵌曲绘" : ""}`);
-  };
-
-  const handlePlayArtwork = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) return;
-    void readFileAsDataUrl(file).then((coverUrl) => {
-      onChartChange({
-        ...chart,
-        meta: {
-          ...chart.meta,
-          coverUrl,
-          coverFileName: file.name,
-        },
-      });
-      setMenuStatus(`已导入曲绘 ${file.name}`);
-    });
-  };
-
   const handlePlayChart = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -1262,8 +1218,6 @@ function PlayView({
   if (playPhase === "menu") {
     return (
       <section className="play-menu-screen">
-        <input ref={playAudioInputRef} hidden type="file" accept={AUDIO_FILE_ACCEPT} onChange={handlePlayAudio} />
-        <input ref={playArtworkInputRef} hidden type="file" accept="image/*" onChange={handlePlayArtwork} />
         <input ref={playChartInputRef} hidden type="file" accept="application/json" onChange={handlePlayChart} />
         <div className="play-menu-hero">
           <div className="play-menu-song">
@@ -1275,9 +1229,7 @@ function PlayView({
             </div>
           </div>
           <div className="play-menu-actions">
-            <button className="primary" onClick={() => playAudioInputRef.current?.click()}>Import Audio</button>
-            <button onClick={() => playArtworkInputRef.current?.click()}>Upload Artwork</button>
-            <button onClick={() => playChartInputRef.current?.click()}>Import JSON</button>
+            <button className="primary" onClick={() => playChartInputRef.current?.click()}>Import JSON</button>
             <button className="primary play-start-button" onClick={startGame}>Play</button>
           </div>
           <p className="play-menu-status">{menuStatus}</p>
