@@ -769,7 +769,7 @@ function PlayView({
     activeSpaceLaneIdsRef.current = [];
     clearTouchInputs();
     setActiveLaneIds(new Set());
-  }, [chart.id, chart.initialLaneCount, chart.laneCount, clearHoldRunState, clearTouchInputs, stopRaf]);
+  }, [chart, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   useEffect(() => {
     if (!isPlaying || calibrationActive) return;
@@ -1346,6 +1346,7 @@ function PlayView({
         setMenuStatus(result.error ?? "导入 JSON 失败");
         return;
       }
+      resetRun();
       onChartChange({
         ...result.chart,
         meta: {
@@ -1727,7 +1728,7 @@ function EditorView({
     setEditTimeMs(0);
     setEditorPreviewLaneCount(getInitialLaneCount(chart));
     setEditorJudgeBursts([]);
-  }, [chart.id, stopPreview]);
+  }, [chart, stopPreview]);
 
   useEffect(() => () => {
     packageObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
