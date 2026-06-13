@@ -1097,7 +1097,7 @@ function PlayView({
       y: event.clientY,
       laneId: touch.laneId,
       laneIndex: touch.laneIndex,
-      side: touch.laneId ? undefined : getTouchSpaceSide(event.clientX),
+      side: getTouchSpaceSide(event.clientX),
     });
     updateTouchFeedback();
     scheduleTouchStartBatch();
@@ -1374,7 +1374,7 @@ function PlayView({
       <audio ref={audioRef} src={chart.meta.audioUrl} onEnded={() => setIsPlaying(false)} />
 
       <section
-        className="stage"
+        className={`stage ${activeSpaceSides.has("left") ? "space-left-active" : ""} ${activeSpaceSides.has("right") ? "space-right-active" : ""}`}
         aria-label="Rhythm playfield"
         onPointerDown={handleStagePointerDown}
         onPointerMove={handleStagePointerMove}
@@ -1410,7 +1410,7 @@ function PlayView({
 
         <div
           ref={laneFieldRef}
-          className={`lane-field ${activeSpaceSides.has("left") ? "space-left-active" : ""} ${activeSpaceSides.has("right") ? "space-right-active" : ""}`}
+          className="lane-field"
           style={{ ...getLaneCanvasStyle(activeLanes.length, "play"), gridTemplateColumns: makeLaneTemplate(activeLanes) }}
         >
           {activeLanes.map((lane) => (

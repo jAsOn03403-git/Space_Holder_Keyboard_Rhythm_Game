@@ -166,6 +166,7 @@ button.primary {
 }
 
 .stage {
+  --lane-field-width: min(76rem, calc(100% - 7rem));
   position: absolute;
   inset: 0;
   display: block;
@@ -181,6 +182,40 @@ button.primary {
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
+}
+
+.stage::before,
+.stage::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 1;
+  width: max(0px, calc((100% - var(--lane-field-width)) / 2));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms ease;
+}
+
+.stage::before {
+  left: 0;
+  background:
+    linear-gradient(180deg, rgba(121, 231, 242, 0.16), transparent 54%),
+    radial-gradient(circle at 100% 84%, rgba(121, 231, 242, 0.22), transparent 42%);
+  box-shadow: inset -2.5rem -3rem 4rem rgba(121, 231, 242, 0.13);
+}
+
+.stage::after {
+  right: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 112, 130, 0.15), transparent 54%),
+    radial-gradient(circle at 0 84%, rgba(255, 112, 130, 0.22), transparent 42%);
+  box-shadow: inset 2.5rem -3rem 4rem rgba(255, 112, 130, 0.13);
+}
+
+.stage.space-left-active::before,
+.stage.space-right-active::after {
+  opacity: 1;
 }
 
 .pause-toggle {
@@ -508,7 +543,7 @@ button.primary {
   left: 50%;
   display: grid;
   align-items: stretch;
-  width: min(76rem, calc(100% - 7rem));
+  width: var(--lane-field-width);
   min-height: 0;
   margin: 0;
   transform: translateX(-50%);
