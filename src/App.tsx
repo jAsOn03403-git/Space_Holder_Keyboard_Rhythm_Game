@@ -21,6 +21,9 @@ interface PlacementTarget {
 
 const BASE_FALL_MS = 1800;
 const JUDGE_LINE_PERCENT = 87;
+const MIN_JUDGE_LINE_PERCENT = 0;
+const MAX_JUDGE_LINE_PERCENT = 100;
+const DEFAULT_LINE_TRANSITION_MS = 300;
 const HIT_WINDOW_MS = 180;
 const MAX_SCORE = 10_000_000;
 const KEY_SOUND_LOOKAHEAD_MS = 90;
@@ -411,6 +414,7 @@ function PlayView({
     [chart.lanes, currentLaneCount],
   );
   const timingGroups = useMemo(() => getTimingGroups(chart), [chart]);
+  const judgeLinePercent = calibrationActive ? JUDGE_LINE_PERCENT : getJudgeLinePercent(timingGroups, chartMs);
   const keyboardSegments = useMemo(() => getKeyboardSegments(activeLanes), [activeLanes]);
   const chartLaneIndexById = useMemo(
     () => new Map(chart.lanes.map((lane, index) => [lane.id, index])),
@@ -428,20 +432,20 @@ function PlayView({
     [chartMs, playableNotes],
   );
   const visiblePlayableNotes = useMemo(
-    () => playableNotes.filter((note) => isNoteVisuallyInWindow(note, chartMs, fallMs, getTimingGroupForNote(note, timingGroups))),
-    [chartMs, fallMs, playableNotes, timingGroups],
+    () => playableNotes.filter((note) => isNoteVisuallyInWindow(note, chartMs, fallMs, getTimingGroupForNote(note, timingGroups), judgeLinePercent)),
+    [chartMs, fallMs, judgeLinePercent, playableNotes, timingGroups],
   );
   const visibleSpaceNoteList = useMemo(
-    () => calibrationActive ? [] : visibleSpaceNotes(visiblePlayableNotes, chartMs, fallMs, timingGroups),
-    [calibrationActive, chartMs, fallMs, timingGroups, visiblePlayableNotes],
+    () => calibrationActive ? [] : visibleSpaceNotes(visiblePlayableNotes, chartMs, fallMs, timingGroups, judgeLinePercent),
+    [calibrationActive, chartMs, fallMs, judgeLinePercent, timingGroups, visiblePlayableNotes],
   );
   const scoreUnit = useMemo(
     () => MAX_SCORE / Math.max(1, countScoringJudgements(chart)),
     [chart],
   );
   const visibleLaneEventNotes = useMemo(
-    () => chart.notes.filter((note) => isLaneNote(note) && isNoteVisuallyInWindow(note, chartMs, fallMs, getTimingGroupForNote(note, timingGroups))),
-    [chart.notes, chartMs, fallMs, timingGroups],
+    () => chart.notes.filter((note) => isLaneNote(note) && isNoteVisuallyInWindow(note, chartMs, fallMs, getTimingGroupForNote(note, timingGroups), judgeLinePercent)),
+    [chart.notes, chartMs, fallMs, judgeLinePercent, timingGroups],
   );
   const calibrationLane = activeLanes[Math.floor(activeLanes.length / 2)] ?? activeLanes[0];
   const calibrationNotes = useMemo<Note[]>(() => {
@@ -1463,6 +1467,7 @@ function PlayView({
                 laneCount={activeLanes.length}
                 noteSize={noteSize}
                 timingGroup={getTimingGroupForNote(note, timingGroups)}
+                judgeLinePercent={judgeLinePercent}
                 judged={displayJudgedIds.has(note.id)}
                 caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
                 dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
@@ -1476,6 +1481,7 @@ function PlayView({
               currentMs={chartMs}
               fallMs={fallMs}
               timingGroup={getTimingGroupForNote(note, timingGroups)}
+              judgeLinePercent={judgeLinePercent}
               laneCount={activeLanes.length}
               projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
               judged={judgedIds.has(note.id)}
@@ -1490,6 +1496,7 @@ function PlayView({
               currentMs={chartMs}
               fallMs={fallMs}
               timingGroup={getTimingGroupForNote(note, timingGroups)}
+              judgeLinePercent={judgeLinePercent}
               laneCount={activeLanes.length}
               maxLaneCount={chart.laneCount}
             />
@@ -1504,18 +1511,20 @@ function PlayView({
                     laneCount={activeLanes.length}
                     startIndex={projection.startIndex}
                     span={projection.span}
+                    judgeLinePercent={judgeLinePercent}
                   />
                   <JudgeBurstLabel
                     burst={burst}
                     laneCount={activeLanes.length}
                     startIndex={projection.startIndex}
                     span={projection.span}
+                    judgeLinePercent={judgeLinePercent}
                   />
                 </Fragment>
               );
             })()
           ))}
-          <div className="judge-line" />
+          <div className="judge-line" style={{ top: `${judgeLinePercent}%` }} />
         </div>
         <KeyboardStrip
           segments={keyboardSegments}
@@ -1945,6 +1954,7 @@ function EditorView({
   };
 
   const addTimingEvent = (groupId: string, type: TimingEventType) => {
+    const targetGroupId = type === "line" ? DEFAULT_TIMING_GROUP_ID : groupId;
     const baseEvent: TimingEvent = {
       id: `timing-event-${Date.now()}`,
       type,
@@ -1952,11 +1962,15 @@ function EditorView({
       multiplier: type === "speed" ? 1.5 : undefined,
       durationMs: type === "freeze" ? 500 : undefined,
       opacity: type === "opacity" ? 0.5 : undefined,
-      transitionMs: type === "opacity" ? 200 : undefined,
+      transitionMs: type === "opacity" ? 200 : type === "line" ? DEFAULT_LINE_TRANSITION_MS : undefined,
+      linePercent: type === "line" ? JUDGE_LINE_PERCENT : undefined,
     };
-    commitTimingGroups(timingGroups.map((group) => group.id === groupId
+    commitTimingGroups(timingGroups.map((group) => group.id === targetGroupId
       ? { ...group, events: [...group.events, baseEvent].sort((a, b) => a.timeMs - b.timeMs) }
       : group));
+    if (type === "line") {
+      setEditingTimingGroupId(DEFAULT_TIMING_GROUP_ID);
+    }
   };
 
   const updateTimingEvent = (groupId: string, eventId: string, patch: Partial<TimingEvent>) => {
@@ -2851,6 +2865,7 @@ function Timeline({
     [displayLanes],
   );
   const timingGroups = useMemo(() => getTimingGroups(chart), [chart]);
+  const judgeLinePercent = getJudgeLinePercent(timingGroups, editTimeMs);
   const previewTimingGroup = getTimingGroupById(timingGroups, activeTimingGroupId);
   const selectionHeadLaneIndex = useMemo(() => {
     const selectedVisibleNotes = chart.notes.filter((note) => selectedNoteIds.has(note.id) && isNoteVisibleOnLanes(note, displayLanes));
@@ -2865,7 +2880,7 @@ function Timeline({
   const readRawTimeFromPointer = (event: React.MouseEvent<HTMLElement>) => {
     const rect = timelineRef.current?.getBoundingClientRect() ?? event.currentTarget.getBoundingClientRect();
     const topPercent = Math.min(100, Math.max(0, ((event.clientY - rect.top) / rect.height) * 100));
-    const distanceMs = ((JUDGE_LINE_PERCENT - topPercent) / JUDGE_LINE_PERCENT) * fallMs;
+    const distanceMs = ((judgeLinePercent - topPercent) / JUDGE_LINE_PERCENT) * fallMs;
     return Math.max(0, Math.min(duration, editTimeMs + distanceMs));
   };
   const readBarLineTimeFromPointer = (event: React.MouseEvent<HTMLElement>) => {
@@ -2875,7 +2890,7 @@ function Timeline({
     const nearestLine = chart.barLines
       .map((line) => ({
         line,
-        top: getNoteTopPercentRaw(line.timeMs, editTimeMs, fallMs),
+        top: getNoteTopPercentRaw(line.timeMs, editTimeMs, fallMs, undefined, judgeLinePercent),
       }))
       .filter(({ top }) => top >= -4 && top <= 104)
       .map(({ line, top }) => ({ line, distance: Math.abs(top - pointerTopPercent) }))
@@ -2922,7 +2937,7 @@ function Timeline({
     return rawLaneIndex - selectionHeadLaneIndex;
   };
   const visibleBarLines = chart.barLines
-    .map((line) => ({ line, top: getNoteTopPercentRaw(line.timeMs, editTimeMs, fallMs) }))
+    .map((line) => ({ line, top: getNoteTopPercentRaw(line.timeMs, editTimeMs, fallMs, undefined, judgeLinePercent) }))
     .filter(({ top }) => top >= -4 && top <= 102);
   const visibleNotesInEditor = chart.notes.filter((note) => {
     if (!isNoteVisibleOnLanes(note, displayLanes)) return false;
@@ -2930,8 +2945,8 @@ function Timeline({
       ? { ...note, timeMs: note.timeMs + selectionMoveDeltaMs }
       : note;
     const timingGroup = getTimingGroupForNote(displayNote, timingGroups);
-    const top = getNoteTopPercentRaw(displayNote.timeMs, editTimeMs, fallMs, timingGroup);
-    const tailTop = displayNote.type === "hold" ? getNoteTopPercentRaw(getNoteEndTimeMs(displayNote), editTimeMs, fallMs, timingGroup) : top;
+    const top = getNoteTopPercentRaw(displayNote.timeMs, editTimeMs, fallMs, timingGroup, judgeLinePercent);
+    const tailTop = displayNote.type === "hold" ? getNoteTopPercentRaw(getNoteEndTimeMs(displayNote), editTimeMs, fallMs, timingGroup, judgeLinePercent) : top;
     return Math.max(top, tailTop) >= -8 && Math.min(top, tailTop) <= 104;
   });
   const displaySelectionRange = selectionRange && isMovingSelection
@@ -2983,7 +2998,7 @@ function Timeline({
             return;
           }
 
-          const note = findNoteAtPointer(event, chart.notes, displayLanes, editTimeMs, fallMs, snapMs, timingGroups);
+          const note = findNoteAtPointer(event, chart.notes, displayLanes, editTimeMs, fallMs, snapMs, timingGroups, judgeLinePercent);
           if (note) {
             onSelectionChange(new Set([note.id]), { startMs: note.timeMs, endMs: getNoteEndTimeMs(note) });
             return;
@@ -3046,23 +3061,23 @@ function Timeline({
           />
         ))}
         {(selectionDraft ?? displaySelectionRange) ? (
-          <span className="selection-range" style={getSelectionRangeStyle(selectionDraft ?? displaySelectionRange, editTimeMs, fallMs)} />
+          <span className="selection-range" style={getSelectionRangeStyle(selectionDraft ?? displaySelectionRange, editTimeMs, fallMs, judgeLinePercent)} />
         ) : null}
-        <div className="judge-line editor-judge-line" />
+        <div className="judge-line editor-judge-line" style={{ top: `${judgeLinePercent}%` }} />
         {visibleNotesInEditor.map((note) => {
           const displayNote = selectedNoteIds.has(note.id) && isMovingSelection
             ? shiftNoteLane({ ...note, timeMs: note.timeMs + selectionMoveDeltaMs }, displayLanes, laneIndexById, selectionMoveLaneDelta)
             : note;
           const laneIndex = getNoteLocalLaneIndex(displayNote, displayLanes, laneIndexById);
           const timingGroup = getTimingGroupForNote(displayNote, timingGroups);
-          const top = getNoteTopPercent(displayNote.timeMs, editTimeMs, fallMs, timingGroup);
+          const top = getNoteTopPercent(displayNote.timeMs, editTimeMs, fallMs, timingGroup, judgeLinePercent);
           const span = displayNote.isSpace ? clampSpaceSpan(displayNote.span ?? 1) : 1;
           const placement = isLaneNote(displayNote)
             ? getLaneEventPlacement(getLaneNoteTargetCount(displayNote, chart.laneCount), displayLanes.length)
             : getNotePlacement(laneIndex, displayLanes.length, span, Boolean(displayNote.isSpace), noteSize);
           const isGhostSpace = !isLaneNote(displayNote) && Boolean(displayNote.isSpace) && !spaceStartHasOverlap(getNoteAnchorIndex(displayNote, laneIndexById), span, displayLanes);
           const noteStyle = {
-            ...getEditorNoteStyle(displayNote, top, editTimeMs, fallMs, placement, timingGroup),
+            ...getEditorNoteStyle(displayNote, top, editTimeMs, fallMs, placement, timingGroup, judgeLinePercent),
             opacity: getTimingOpacity(timingGroup, editTimeMs) * (isGhostSpace ? 0.32 : 1),
           };
           return (
@@ -3096,11 +3111,11 @@ function Timeline({
             <span
               className={`timeline-note placement-preview ${pendingHoldStart && isHoldPreview ? "hold-pending" : ""} ${isHoldPreview ? "hold-note" : ""} ${isSpacePreview ? "space-note" : ""} ${placementMode === "lane" ? "lane-note" : ""} ${getPlacementSpaceSideClass(placementMode)} ${isGhostPreview ? "ghost-space" : ""}`}
               style={{
-                top: `${getNoteTopPercent(previewStartTimeMs, editTimeMs, fallMs, previewTimingGroup)}%`,
+                top: `${getNoteTopPercent(previewStartTimeMs, editTimeMs, fallMs, previewTimingGroup, judgeLinePercent)}%`,
                 left: `${previewPlacement.left}%`,
                 width: `${previewPlacement.width}%`,
                 opacity: getTimingOpacity(previewTimingGroup, editTimeMs) * (isGhostPreview ? 0.32 : 1),
-                ...(isHoldPreview ? getHoldPreviewStyle(previewStartTimeMs, previewDurationMs, editTimeMs, fallMs, previewTimingGroup) : {}),
+                ...(isHoldPreview ? getHoldPreviewStyle(previewStartTimeMs, previewDurationMs, editTimeMs, fallMs, previewTimingGroup, judgeLinePercent) : {}),
               }}
             />
           );
@@ -3115,6 +3130,7 @@ function Timeline({
                 laneCount={displayLanes.length}
                 startIndex={projection.startIndex}
                 span={projection.span}
+                judgeLinePercent={judgeLinePercent}
               />
             );
           })()
@@ -3161,6 +3177,7 @@ function NoteBlock({
   laneCount,
   noteSize,
   timingGroup,
+  judgeLinePercent,
   judged,
   caught,
   dimmed,
@@ -3172,11 +3189,12 @@ function NoteBlock({
   laneCount: number;
   noteSize: number;
   timingGroup: TimingGroup;
+  judgeLinePercent: number;
   judged: boolean;
   caught: boolean;
   dimmed: boolean;
 }) {
-  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
+  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
   const placement = getNotePlacement(laneIndex, laneCount, 1, false, noteSize);
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (dimmed ? 0.42 : 1);
 
@@ -3185,7 +3203,7 @@ function NoteBlock({
       className={`note-block ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""}`}
       style={{
         ...(note.type === "hold"
-          ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught)
+          ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught, judgeLinePercent)
           : { top: `${top}%`, left: `${placement.left}%`, width: `${placement.width}%` }),
         opacity,
       }}
@@ -3198,6 +3216,7 @@ function SpaceNoteBlock({
   currentMs,
   fallMs,
   timingGroup,
+  judgeLinePercent,
   laneCount,
   projection,
   judged,
@@ -3208,18 +3227,19 @@ function SpaceNoteBlock({
   currentMs: number;
   fallMs: number;
   timingGroup: TimingGroup;
+  judgeLinePercent: number;
   laneCount: number;
   projection: SpaceProjection;
   judged: boolean;
   caught: boolean;
   dimmed: boolean;
 }) {
-  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
+  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
   const placement = getSpacePlacementFromStartIndex(projection.startIndex, laneCount, projection.span);
   const isGhostSpace = !projection.isJudgeable;
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (isGhostSpace ? 0.32 : dimmed ? 0.42 : 1);
   const style = note.type === "hold"
-    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught)
+    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught, judgeLinePercent)
     : {
       top: `${top}%`,
       left: `${placement.left}%`,
@@ -3239,6 +3259,7 @@ function LaneEventBlock({
   currentMs,
   fallMs,
   timingGroup,
+  judgeLinePercent,
   laneCount,
   maxLaneCount,
 }: {
@@ -3246,10 +3267,11 @@ function LaneEventBlock({
   currentMs: number;
   fallMs: number;
   timingGroup: TimingGroup;
+  judgeLinePercent: number;
   laneCount: number;
   maxLaneCount: number;
 }) {
-  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
+  const top = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
   const placement = getLaneEventPlacement(getLaneNoteTargetCount(note, maxLaneCount), laneCount);
   return (
     <span
@@ -3269,11 +3291,13 @@ function JudgeBurstLabel({
   laneCount,
   startIndex,
   span: projectedSpan,
+  judgeLinePercent,
 }: {
   burst: JudgeBurst;
   laneCount: number;
   startIndex: number;
   span?: number;
+  judgeLinePercent: number;
 }) {
   const span = Math.max(1, projectedSpan ?? burst.span);
   const center = ((startIndex + span / 2) / laneCount) * 100;
@@ -3281,7 +3305,7 @@ function JudgeBurstLabel({
   return (
     <span
       className={`judge-burst ${burst.result}`}
-      style={{ left: `${center}%` }}
+      style={{ left: `${center}%`, top: `calc(${judgeLinePercent}% - 1.45rem)` }}
     >
       {burst.result}
     </span>
@@ -3293,11 +3317,13 @@ function JudgeHitEffect({
   laneCount,
   startIndex,
   span: projectedSpan,
+  judgeLinePercent,
 }: {
   burst: JudgeBurst;
   laneCount: number;
   startIndex: number;
   span?: number;
+  judgeLinePercent: number;
 }) {
   const span = Math.max(1, projectedSpan ?? burst.span);
   const left = (startIndex / laneCount) * 100;
@@ -3306,7 +3332,7 @@ function JudgeHitEffect({
   return (
     <span
       className={`hit-effect ${burst.result} ${burst.spaceSide === "left" ? "left-space-hit" : ""} ${burst.spaceSide === "right" ? "right-space-hit" : ""}`}
-      style={{ left: `${left}%`, width: `${width}%` }}
+      style={{ left: `${left}%`, top: `calc(${judgeLinePercent}% - 0.6rem)`, width: `${width}%` }}
     />
   );
 }
@@ -3464,6 +3490,7 @@ function TimingGroupsPanel({
         <button onClick={() => onAddEvent(editingTimingGroup.id, "speed")}>Add Speed</button>
         <button onClick={() => onAddEvent(editingTimingGroup.id, "freeze")}>Add Freeze</button>
         <button onClick={() => onAddEvent(editingTimingGroup.id, "opacity")}>Add Opacity</button>
+        <button onClick={() => onAddEvent(editingTimingGroup.id, "line")}>Add Line</button>
       </div>
       <div className="timing-events">
         {editingTimingGroup.events.length ? editingTimingGroup.events.map((event) => (
@@ -3527,6 +3554,31 @@ function TimingGroupsPanel({
                 </label>
               </>
             ) : null}
+            {event.type === "line" ? (
+              <>
+                <label>
+                  <span>line %</span>
+                  <input
+                    type="number"
+                    min={MIN_JUDGE_LINE_PERCENT}
+                    max={MAX_JUDGE_LINE_PERCENT}
+                    step={1}
+                    value={event.linePercent ?? JUDGE_LINE_PERCENT}
+                    onChange={(inputEvent) => onUpdateEvent(editingTimingGroup.id, event.id, { linePercent: Number(inputEvent.target.value) })}
+                  />
+                </label>
+                <label>
+                  <span>move</span>
+                  <input
+                    type="number"
+                    min={0}
+                    step={10}
+                    value={event.transitionMs ?? DEFAULT_LINE_TRANSITION_MS}
+                    onChange={(inputEvent) => onUpdateEvent(editingTimingGroup.id, event.id, { transitionMs: Number(inputEvent.target.value) })}
+                  />
+                </label>
+              </>
+            ) : null}
             <button onClick={() => onDeleteEvent(editingTimingGroup.id, event.id)}>x</button>
           </div>
         )) : (
@@ -3543,38 +3595,40 @@ function visibleTapNotes(
   currentMs: number,
   fallMs: number,
   timingGroups: TimingGroup[] = createDefaultTimingGroups(),
+  judgeLinePercent = JUDGE_LINE_PERCENT,
 ) {
   return notes.filter((note) => {
     return (
       !note.isSpace
       && !isLaneNote(note)
       && note.laneId === lane.id
-      && isNoteVisuallyInWindow(note, currentMs, fallMs, getTimingGroupForNote(note, timingGroups))
+      && isNoteVisuallyInWindow(note, currentMs, fallMs, getTimingGroupForNote(note, timingGroups), judgeLinePercent)
     );
   });
 }
 
-function visibleSpaceNotes(notes: Note[], currentMs: number, fallMs: number, timingGroups: TimingGroup[] = createDefaultTimingGroups()) {
+function visibleSpaceNotes(notes: Note[], currentMs: number, fallMs: number, timingGroups: TimingGroup[] = createDefaultTimingGroups(), judgeLinePercent = JUDGE_LINE_PERCENT) {
   return notes.filter((note) => (
     !isLaneNote(note)
     && note.isSpace
-    && isNoteVisuallyInWindow(note, currentMs, fallMs, getTimingGroupForNote(note, timingGroups))
+    && isNoteVisuallyInWindow(note, currentMs, fallMs, getTimingGroupForNote(note, timingGroups), judgeLinePercent)
   ));
 }
 
-function getNoteTopPercent(timeMs: number, currentMs: number, fallMs: number, timingGroup?: TimingGroup) {
-  return Math.max(-10, Math.min(102, getNoteTopPercentRaw(timeMs, currentMs, fallMs, timingGroup)));
+function getNoteTopPercent(timeMs: number, currentMs: number, fallMs: number, timingGroup?: TimingGroup, judgeLinePercent = JUDGE_LINE_PERCENT) {
+  return Math.max(-10, Math.min(102, getNoteTopPercentRaw(timeMs, currentMs, fallMs, timingGroup, judgeLinePercent)));
 }
 
-function getNoteTopPercentRaw(timeMs: number, currentMs: number, fallMs: number, timingGroup?: TimingGroup) {
+function getNoteTopPercentRaw(timeMs: number, currentMs: number, fallMs: number, timingGroup?: TimingGroup, judgeLinePercent = JUDGE_LINE_PERCENT) {
+  const safeJudgeLinePercent = clampJudgeLinePercent(judgeLinePercent);
   const visualCurrentMs = timingGroup ? getFreezeClampedTime(timingGroup, currentMs) : currentMs;
   const distanceMs = timingGroup ? getSpeedScaledDeltaMs(timingGroup, visualCurrentMs, timeMs) : timeMs - currentMs;
-  return JUDGE_LINE_PERCENT - (distanceMs / fallMs) * JUDGE_LINE_PERCENT;
+  return safeJudgeLinePercent - (distanceMs / fallMs) * JUDGE_LINE_PERCENT;
 }
 
-function isNoteVisuallyInWindow(note: Note, currentMs: number, fallMs: number, timingGroup?: TimingGroup) {
-  const headTop = getNoteTopPercentRaw(note.timeMs, currentMs, fallMs, timingGroup);
-  const tailTop = note.type === "hold" ? getNoteTopPercentRaw(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup) : headTop;
+function isNoteVisuallyInWindow(note: Note, currentMs: number, fallMs: number, timingGroup?: TimingGroup, judgeLinePercent = JUDGE_LINE_PERCENT) {
+  const headTop = getNoteTopPercentRaw(note.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const tailTop = note.type === "hold" ? getNoteTopPercentRaw(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup, judgeLinePercent) : headTop;
   return Math.max(headTop, tailTop) >= -8 && Math.min(headTop, tailTop) <= 104;
 }
 
@@ -3596,6 +3650,10 @@ function keepEditableTimingGroups(groups: TimingGroup[]) {
           ...event,
           id: event.id || `timing-event-${Date.now()}-${Math.round(event.timeMs)}`,
           timeMs: Math.max(0, Math.round(event.timeMs)),
+          ...(event.type === "line" ? {
+            linePercent: clampJudgeLinePercent(event.linePercent),
+            transitionMs: Math.max(0, Number.isFinite(event.transitionMs) ? Math.round(event.transitionMs ?? DEFAULT_LINE_TRANSITION_MS) : DEFAULT_LINE_TRANSITION_MS),
+          } : {}),
         }))
         .sort((a, b) => a.timeMs - b.timeMs),
     }))
@@ -3620,6 +3678,34 @@ function getTimingGroupById(groups: TimingGroup[], groupId?: string) {
 
 function getTimingGroupForNote(note: Note, groups: TimingGroup[]) {
   return getTimingGroupById(groups, note.timingGroupId ?? DEFAULT_TIMING_GROUP_ID);
+}
+
+function getJudgeLinePercent(groups: TimingGroup[], currentMs: number) {
+  const defaultGroup = getTimingGroupById(groups, DEFAULT_TIMING_GROUP_ID);
+  const lineEvents = defaultGroup.events
+    .filter((event) => event.type === "line")
+    .sort((a, b) => a.timeMs - b.timeMs);
+  let previousPercent = JUDGE_LINE_PERCENT;
+
+  for (const event of lineEvents) {
+    const targetPercent = clampJudgeLinePercent(event.linePercent);
+    const transitionMs = Math.max(0, Number.isFinite(event.transitionMs) ? event.transitionMs ?? DEFAULT_LINE_TRANSITION_MS : DEFAULT_LINE_TRANSITION_MS);
+    if (currentMs < event.timeMs) {
+      return previousPercent;
+    }
+    if (transitionMs > 0 && currentMs < event.timeMs + transitionMs) {
+      const progress = (currentMs - event.timeMs) / transitionMs;
+      return previousPercent + (targetPercent - previousPercent) * progress;
+    }
+    previousPercent = targetPercent;
+  }
+
+  return previousPercent;
+}
+
+function clampJudgeLinePercent(value: number | undefined) {
+  const safeValue = Number.isFinite(value) ? value ?? JUDGE_LINE_PERCENT : JUDGE_LINE_PERCENT;
+  return Math.min(MAX_JUDGE_LINE_PERCENT, Math.max(MIN_JUDGE_LINE_PERCENT, safeValue));
 }
 
 function selectedNotesTimingGroupId(notes: Note[], selectedNoteIds: Set<string>) {
@@ -3727,10 +3813,11 @@ function getPlayHoldStyle(
   placement: { left: number; width: number },
   timingGroup?: TimingGroup,
   caught = false,
+  judgeLinePercent = JUDGE_LINE_PERCENT,
 ): CSSProperties {
-  const rawTailTop = getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup);
+  const rawTailTop = getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup, judgeLinePercent);
   const clampedHeadTop = caught && currentMs >= note.timeMs
-    ? Math.min(headTop, JUDGE_LINE_PERCENT)
+    ? Math.min(headTop, judgeLinePercent)
     : headTop;
   const top = Math.min(clampedHeadTop, rawTailTop);
   return {
@@ -3749,6 +3836,7 @@ function getEditorNoteStyle(
   fallMs: number,
   placement: { left: number; width: number },
   timingGroup?: TimingGroup,
+  judgeLinePercent = JUDGE_LINE_PERCENT,
 ): CSSProperties {
   if (note.type !== "hold") {
     return {
@@ -3757,12 +3845,12 @@ function getEditorNoteStyle(
       width: `${placement.width}%`,
     };
   }
-  return getPlayHoldStyle(note, headTop, editTimeMs, fallMs, placement, timingGroup);
+  return getPlayHoldStyle(note, headTop, editTimeMs, fallMs, placement, timingGroup, false, judgeLinePercent);
 }
 
-function getHoldPreviewStyle(timeMs: number, durationMs: number, editTimeMs: number, fallMs: number, timingGroup?: TimingGroup): CSSProperties {
-  const headTop = getNoteTopPercent(timeMs, editTimeMs, fallMs, timingGroup);
-  const tailTop = getNoteTopPercent(timeMs + clampHoldDurationMs(durationMs), editTimeMs, fallMs, timingGroup);
+function getHoldPreviewStyle(timeMs: number, durationMs: number, editTimeMs: number, fallMs: number, timingGroup?: TimingGroup, judgeLinePercent = JUDGE_LINE_PERCENT): CSSProperties {
+  const headTop = getNoteTopPercent(timeMs, editTimeMs, fallMs, timingGroup, judgeLinePercent);
+  const tailTop = getNoteTopPercent(timeMs + clampHoldDurationMs(durationMs), editTimeMs, fallMs, timingGroup, judgeLinePercent);
   return {
     top: `${Math.min(headTop, tailTop)}%`,
     height: `${Math.max(1.1, Math.abs(tailTop - headTop))}%`,
@@ -3770,10 +3858,10 @@ function getHoldPreviewStyle(timeMs: number, durationMs: number, editTimeMs: num
   };
 }
 
-function getSelectionRangeStyle(range: SelectionRange | null, currentMs: number, fallMs: number): CSSProperties {
+function getSelectionRangeStyle(range: SelectionRange | null, currentMs: number, fallMs: number, judgeLinePercent = JUDGE_LINE_PERCENT): CSSProperties {
   if (!range) return {};
-  const startTop = getNoteTopPercent(Math.min(range.startMs, range.endMs), currentMs, fallMs);
-  const endTop = getNoteTopPercent(Math.max(range.startMs, range.endMs), currentMs, fallMs);
+  const startTop = getNoteTopPercent(Math.min(range.startMs, range.endMs), currentMs, fallMs, undefined, judgeLinePercent);
+  const endTop = getNoteTopPercent(Math.max(range.startMs, range.endMs), currentMs, fallMs, undefined, judgeLinePercent);
   return {
     top: `${Math.min(startTop, endTop)}%`,
     height: `${Math.max(0.2, Math.abs(endTop - startTop))}%`,
@@ -3800,6 +3888,7 @@ function findNoteAtPointer(
   fallMs: number,
   snapMs: number,
   timingGroups: TimingGroup[] = createDefaultTimingGroups(),
+  judgeLinePercent = JUDGE_LINE_PERCENT,
 ) {
   const timeline = event.currentTarget.querySelector(".timeline");
   const rect = timeline?.getBoundingClientRect();
@@ -3815,8 +3904,8 @@ function findNoteAtPointer(
     .filter((note) => noteContainsLane(note, rawLaneIndex, laneCount, laneIndexById, lanes))
     .map((note) => {
       const timingGroup = getTimingGroupForNote(note, timingGroups);
-      const headTop = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup);
-      const tailTop = note.type === "hold" ? getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup) : headTop;
+      const headTop = getNoteTopPercent(note.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+      const tailTop = note.type === "hold" ? getNoteTopPercent(getNoteEndTimeMs(note), currentMs, fallMs, timingGroup, judgeLinePercent) : headTop;
       const minTop = Math.min(headTop, tailTop);
       const maxTop = Math.max(headTop, tailTop);
       const insideVertical = note.type === "hold"

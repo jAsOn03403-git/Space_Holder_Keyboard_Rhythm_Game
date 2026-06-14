@@ -1,7 +1,7 @@
 export type NoteType = "tap" | "hold" | "lane";
 export type HoldDensityPosition = "head" | "middle" | "tail";
 export type SpaceSide = "left" | "right";
-export type TimingEventType = "speed" | "freeze" | "opacity";
+export type TimingEventType = "speed" | "freeze" | "opacity" | "line";
 
 export interface SongMeta {
   title: string;
@@ -56,6 +56,7 @@ export interface TimingEvent {
   durationMs?: number;
   opacity?: number;
   transitionMs?: number;
+  linePercent?: number;
 }
 
 export interface TimingGroup {

@@ -687,16 +687,17 @@ button.primary {
 .judge-line {
   position: absolute;
   right: 0;
-  bottom: 13%;
+  top: 87%;
   left: 0;
   height: 3px;
   background: linear-gradient(90deg, transparent, #fff, transparent);
   box-shadow: 0 0 16px rgba(255, 255, 255, 0.78);
+  transform: translateY(-50%);
 }
 
 .judge-burst {
   position: absolute;
-  bottom: calc(13% + 1.45rem);
+  top: calc(87% - 1.45rem);
   z-index: 8;
   transform: translateX(-50%);
   border-radius: 7px;
@@ -713,7 +714,7 @@ button.primary {
 
 .hit-effect {
   position: absolute;
-  bottom: calc(13% - 0.6rem);
+  top: calc(87% - 0.6rem);
   z-index: 7;
   height: 2.2rem;
   border-radius: 999px;

@@ -3,6 +3,10 @@ import { clampLaneCount, createLaneConfigs } from "./keyboard";
 
 const DEFAULT_BPM = 128;
 const DEFAULT_DURATION_MS = 90_000;
+const DEFAULT_JUDGE_LINE_PERCENT = 87;
+const MIN_JUDGE_LINE_PERCENT = 0;
+const MAX_JUDGE_LINE_PERCENT = 100;
+const DEFAULT_LINE_TRANSITION_MS = 300;
 export const DEFAULT_TIMING_GROUP_ID = "default";
 
 interface LayoutState {
@@ -95,6 +99,10 @@ export function normalizeTimingGroups(groups?: TimingGroup[]): TimingGroup[] {
           ...event,
           id: event.id || `timing-event-${Date.now()}-${Math.round(event.timeMs)}`,
           timeMs: Math.max(0, Math.round(event.timeMs)),
+          ...(event.type === "line" ? {
+            linePercent: clampJudgeLinePercent(event.linePercent),
+            transitionMs: Math.max(0, Number.isFinite(event.transitionMs) ? Math.round(event.transitionMs ?? DEFAULT_LINE_TRANSITION_MS) : DEFAULT_LINE_TRANSITION_MS),
+          } : {}),
         }))
         .sort((a, b) => a.timeMs - b.timeMs),
     }))
@@ -109,6 +117,11 @@ export function normalizeTimingGroups(groups?: TimingGroup[]): TimingGroup[] {
   }
 
   return normalized;
+}
+
+function clampJudgeLinePercent(value: number | undefined) {
+  const safeValue = Number.isFinite(value) ? value ?? DEFAULT_JUDGE_LINE_PERCENT : DEFAULT_JUDGE_LINE_PERCENT;
+  return Math.min(MAX_JUDGE_LINE_PERCENT, Math.max(MIN_JUDGE_LINE_PERCENT, safeValue));
 }
 
 export function createBarLines(bpm: number, durationMs: number, beatsPerBar = 4): BarLine[] {
