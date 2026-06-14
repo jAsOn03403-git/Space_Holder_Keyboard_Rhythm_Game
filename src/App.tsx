@@ -1592,6 +1592,7 @@ function EditorView({
   const [isMovingSelection, setIsMovingSelection] = useState(false);
   const [selectionMovePreviewMs, setSelectionMovePreviewMs] = useState<number | null>(null);
   const [selectionMoveLaneDelta, setSelectionMoveLaneDelta] = useState(0);
+  const [selectionResetSignal, setSelectionResetSignal] = useState(0);
   const [selectionStartInput, setSelectionStartInput] = useState("0");
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [editorPreviewLaneCount, setEditorPreviewLaneCount] = useState(getInitialLaneCount(chart));
@@ -1738,6 +1739,38 @@ function EditorView({
     setEditorPreviewLaneCount(getInitialLaneCount(chart));
     setEditorJudgeBursts([]);
   }, [chart, stopPreview]);
+
+  const clearEditorSelection = useCallback(() => {
+    setPlacementMode("select");
+    setSelectedNoteIds(new Set());
+    setSelectionRange(null);
+    setIsMovingSelection(false);
+    setSelectionMovePreviewMs(null);
+    setSelectionMoveLaneDelta(0);
+    setSelectionResetSignal((signal) => signal + 1);
+  }, []);
+
+  useEffect(() => {
+    const handleEditorEscape = (event: KeyboardEvent) => {
+      if (normalizeKeyboardEventCode(event) !== "Escape") return;
+      if (isKeyboardEditingTarget(event.target)) return;
+      if (
+        placementMode === "select"
+        && !selectedNoteIds.size
+        && !selectionRange
+        && !isMovingSelection
+        && selectionMovePreviewMs === null
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      clearEditorSelection();
+    };
+
+    window.addEventListener("keydown", handleEditorEscape);
+    return () => window.removeEventListener("keydown", handleEditorEscape);
+  }, [clearEditorSelection, isMovingSelection, placementMode, selectedNoteIds.size, selectionMovePreviewMs, selectionRange]);
 
   useEffect(() => () => {
     packageObjectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
@@ -2775,6 +2808,7 @@ function EditorView({
             laneEventTargetCount={laneEventTargetCount}
             selectedNoteIds={selectedNoteIds}
             selectionRange={selectionRange}
+            selectionResetSignal={selectionResetSignal}
             isMovingSelection={isMovingSelection}
             selectionMoveDeltaMs={selectionHeadTimeMs === undefined || selectionMovePreviewMs === null ? 0 : selectionMovePreviewMs - selectionHeadTimeMs}
             selectionMoveLaneDelta={selectionMoveLaneDelta}
@@ -2815,6 +2849,7 @@ function Timeline({
   laneEventTargetCount,
   selectedNoteIds,
   selectionRange,
+  selectionResetSignal,
   isMovingSelection,
   selectionMoveDeltaMs,
   selectionMoveLaneDelta,
@@ -2840,6 +2875,7 @@ function Timeline({
   laneEventTargetCount: number;
   selectedNoteIds: Set<string>;
   selectionRange: SelectionRange | null;
+  selectionResetSignal: number;
   isMovingSelection: boolean;
   selectionMoveDeltaMs: number;
   selectionMoveLaneDelta: number;
@@ -2856,6 +2892,12 @@ function Timeline({
   const [pendingHoldStart, setPendingHoldStart] = useState<(PlacementTarget & { isSpace: boolean }) | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<SelectionRange | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    setHoverPreview(null);
+    setPendingHoldStart(null);
+    setSelectionDraft(null);
+  }, [selectionResetSignal]);
   const displayLanes = useMemo(
     () => previewLaneCount === undefined ? chart.lanes : getActiveLaneSlice(chart.lanes, previewLaneCount),
     [chart.lanes, previewLaneCount],
@@ -4192,6 +4234,11 @@ function isTouchPointerEvent(event: ReactPointerEvent<HTMLElement>) {
 function isTouchUiTarget(target: EventTarget | null) {
   if (!(target instanceof Element)) return false;
   return Boolean(target.closest("button, input, select, textarea, a, .pause-overlay"));
+}
+
+function isKeyboardEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("input, select, textarea, [contenteditable='true']"));
 }
 
 function isSpaceTapSide(note: Note, side: SpaceSide) {
