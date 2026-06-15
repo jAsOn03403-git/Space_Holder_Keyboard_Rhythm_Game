@@ -1739,7 +1739,13 @@ function EditorView({
     setEditTimeMs(0);
     setEditorPreviewLaneCount(getInitialLaneCount(chart));
     setEditorJudgeBursts([]);
-  }, [chart, stopPreview]);
+  }, [chart.id, chart.initialLaneCount, chart.meta.audioUrl, chart.meta.durationMs, stopPreview]);
+
+  useEffect(() => {
+    previewSoundedIdsRef.current.clear();
+    previewScheduledKeySoundIdsRef.current.clear();
+    setEditorJudgeBursts([]);
+  }, [chart.notes, chart.timingGroups]);
 
   const clearEditorSelection = useCallback(() => {
     setPlacementMode("select");
