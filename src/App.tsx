@@ -1593,6 +1593,7 @@ function EditorView({
   const [selectionMovePreviewMs, setSelectionMovePreviewMs] = useState<number | null>(null);
   const [selectionMoveLaneDelta, setSelectionMoveLaneDelta] = useState(0);
   const [selectionResetSignal, setSelectionResetSignal] = useState(0);
+  const [showTimingGroupsPanel, setShowTimingGroupsPanel] = useState(false);
   const [selectionStartInput, setSelectionStartInput] = useState("0");
   const [isPreviewing, setIsPreviewing] = useState(false);
   const [editorPreviewLaneCount, setEditorPreviewLaneCount] = useState(getInitialLaneCount(chart));
@@ -2211,13 +2212,6 @@ function EditorView({
     onChartChange({ ...chart, notes: chart.notes.slice(0, -1) });
   };
 
-  const clearChart = () => {
-    onChartChange({ ...chart, notes: [] });
-    setSelectedNoteIds(new Set());
-    setSelectionRange(null);
-    setAnalysisLabel("已清空谱面，可以重新手工铺谱");
-  };
-
   const wheelSeekEditor = (deltaY: number) => {
     const next = snapTime(editTimeMs - deltaY * 4, snapMs, chart.meta.durationMs);
     seekPreview(next);
@@ -2485,8 +2479,30 @@ function EditorView({
 
       <section className="editor-grid">
         <div className="editor-panel map-panel">
-          <h2>手工铺谱工具</h2>
           <div className="manual-tools">
+            <button
+              type="button"
+              className={showTimingGroupsPanel ? "primary" : ""}
+              onClick={() => setShowTimingGroupsPanel((visible) => !visible)}
+            >
+              Timing Group
+            </button>
+            {showTimingGroupsPanel ? (
+              <TimingGroupsPanel
+                timingGroups={timingGroups}
+                activeTimingGroupId={activeTimingGroupId}
+                editingTimingGroupId={editingTimingGroupId}
+                editingTimingGroup={editingTimingGroup}
+                onActiveTimingGroupChange={setActiveTimingGroupId}
+                onEditingTimingGroupChange={setEditingTimingGroupId}
+                onAddGroup={addTimingGroup}
+                onRenameGroup={renameTimingGroup}
+                onDeleteGroup={deleteTimingGroup}
+                onAddEvent={addTimingEvent}
+                onUpdateEvent={updateTimingEvent}
+                onDeleteEvent={deleteTimingEvent}
+              />
+            ) : null}
             {!selectedNoteIds.size ? (
               <>
               <div className="placement-mode" role="radiogroup" aria-label="Note placement mode">
@@ -2714,20 +2730,6 @@ function EditorView({
                 ) : null}
                   </>
                 ) : null}
-                <TimingGroupsPanel
-                  timingGroups={timingGroups}
-                  activeTimingGroupId={activeTimingGroupId}
-                  editingTimingGroupId={editingTimingGroupId}
-                  editingTimingGroup={editingTimingGroup}
-                  onActiveTimingGroupChange={setActiveTimingGroupId}
-                  onEditingTimingGroupChange={setEditingTimingGroupId}
-                  onAddGroup={addTimingGroup}
-                  onRenameGroup={renameTimingGroup}
-                  onDeleteGroup={deleteTimingGroup}
-                  onAddEvent={addTimingEvent}
-                  onUpdateEvent={updateTimingEvent}
-                  onDeleteEvent={deleteTimingEvent}
-                />
                 <button
                   className="return-button"
                   onClick={() => {
@@ -2746,7 +2748,6 @@ function EditorView({
             {!selectedNoteIds.size ? (
               <>
                 <button onClick={removeLastNote} disabled={!chart.notes.length}>Undo Last</button>
-                <button onClick={clearChart} disabled={!chart.notes.length}>Clear</button>
               </>
             ) : null}
           </div>
