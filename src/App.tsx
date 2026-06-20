@@ -28,6 +28,8 @@ const HIT_WINDOW_MS = 180;
 const MAX_SCORE = 10_000_000;
 const KEY_SOUND_LOOKAHEAD_MS = 90;
 const TOUCH_SPACE_GRACE_MS = 100;
+const TOUCH_BATCH_MS = 4;
+const MAX_INPUT_OFFSET_MS = 200;
 const TOUCH_LEFT_ZONE_RATIO = 0.47;
 const TOUCH_RIGHT_ZONE_RATIO = 0.53;
 const CALIBRATION_TAP_COUNT = 15;
@@ -110,6 +112,7 @@ interface TouchStartInput {
   pointerId: number;
   x: number;
   y: number;
+  inputChartMs: number;
   laneId?: string;
   laneIndex?: number;
   side?: SpaceSide;
@@ -153,6 +156,7 @@ export default function App() {
   const [snapDivision, setSnapDivision] = useStoredNumber("keyboard-beat-lab:snap-division", 4);
   const [holdDensity, setHoldDensity] = useStoredNumber("keyboard-beat-lab:hold-density", DEFAULT_HOLD_DENSITY);
   const [offsetMs, setOffsetMs] = useStoredNumber("keyboard-beat-lab:key-offset-ms", 0);
+  const [touchOffsetMs, setTouchOffsetMs] = useStoredNumber("keyboard-beat-lab:touch-offset-ms", 0);
   const [autoplay, setAutoplay] = useStoredBoolean("keyboard-beat-lab:autoplay", false);
 
   useEffect(() => {
@@ -184,12 +188,14 @@ export default function App() {
           noteSpeed={playSpeed}
           noteSize={noteSize}
           offsetMs={offsetMs}
+          touchOffsetMs={touchOffsetMs}
           autoplay={autoplay}
           onMusicVolumeChange={setMusicVolume}
           onKeyVolumeChange={setKeyVolume}
           onNoteSpeedChange={setPlaySpeed}
           onNoteSizeChange={setNoteSize}
           onOffsetChange={setOffsetMs}
+          onTouchOffsetChange={setTouchOffsetMs}
           onAutoplayChange={setAutoplay}
         />
       ) : (
@@ -250,12 +256,16 @@ function PlaySettingsControls({
   noteSpeed,
   noteSize,
   offsetMs,
+  touchOffsetMs,
   autoplay,
+  calibrationResultMs,
   onMusicVolumeChange,
   onKeyVolumeChange,
   onNoteSpeedChange,
   onNoteSizeChange,
   onOffsetChange,
+  onTouchOffsetChange,
+  onStartTouchCalibration,
   onAutoplayChange,
 }: {
   musicVolume: number;
@@ -263,12 +273,16 @@ function PlaySettingsControls({
   noteSpeed: number;
   noteSize: number;
   offsetMs: number;
+  touchOffsetMs: number;
   autoplay: boolean;
+  calibrationResultMs: number | null;
   onMusicVolumeChange: (volume: number) => void;
   onKeyVolumeChange: (volume: number) => void;
   onNoteSpeedChange: (speed: number) => void;
   onNoteSizeChange: (size: number) => void;
   onOffsetChange: (offsetMs: number) => void;
+  onTouchOffsetChange: (offsetMs: number) => void;
+  onStartTouchCalibration: () => void;
   onAutoplayChange: (enabled: boolean) => void;
 }) {
   return (
@@ -321,13 +335,28 @@ function PlaySettingsControls({
         <span>Chart Offset {Math.round(offsetMs)}ms</span>
         <input
           type="range"
-          min={-200}
-          max={200}
+          min={-MAX_INPUT_OFFSET_MS}
+          max={MAX_INPUT_OFFSET_MS}
           step={1}
           value={offsetMs}
           onChange={(event) => onOffsetChange(Number(event.target.value))}
         />
       </label>
+      <label className="speed-control">
+        <span>Touch Offset {Math.round(touchOffsetMs)}ms</span>
+        <input
+          type="range"
+          min={-MAX_INPUT_OFFSET_MS}
+          max={MAX_INPUT_OFFSET_MS}
+          step={1}
+          value={touchOffsetMs}
+          onChange={(event) => onTouchOffsetChange(Number(event.target.value))}
+        />
+      </label>
+      <div className="touch-calibration-control">
+        <button type="button" onClick={onStartTouchCalibration}>Calibrate Touch</button>
+        <span>{calibrationResultMs === null ? "15 taps" : `Last ${Math.round(calibrationResultMs)}ms`}</span>
+      </div>
       <label className="speed-control toggle-control">
         <span>Autoplay</span>
         <input
@@ -348,12 +377,14 @@ function PlayView({
   noteSpeed,
   noteSize,
   offsetMs,
+  touchOffsetMs,
   autoplay,
   onMusicVolumeChange,
   onKeyVolumeChange,
   onNoteSpeedChange,
   onNoteSizeChange,
   onOffsetChange,
+  onTouchOffsetChange,
   onAutoplayChange,
 }: {
   chart: Chart;
@@ -363,12 +394,14 @@ function PlayView({
   noteSpeed: number;
   noteSize: number;
   offsetMs: number;
+  touchOffsetMs: number;
   autoplay: boolean;
   onMusicVolumeChange: (volume: number) => void;
   onKeyVolumeChange: (volume: number) => void;
   onNoteSpeedChange: (speed: number) => void;
   onNoteSizeChange: (size: number) => void;
   onOffsetChange: (offsetMs: number) => void;
+  onTouchOffsetChange: (offsetMs: number) => void;
   onAutoplayChange: (enabled: boolean) => void;
 }) {
   const [playPhase, setPlayPhase] = useState<PlayPhase>("menu");
@@ -393,6 +426,7 @@ function PlayView({
   const startAtRef = useRef(0);
   const animationRef = useRef<number | null>(null);
   const pendingGameStartRef = useRef(false);
+  const pendingCalibrationStartRef = useRef(false);
   const forcedResumeMsRef = useRef<number | null>(null);
   const pressedCodesRef = useRef<Set<string>>(new Set());
   const keyPressTimesRef = useRef<Map<string, number>>(new Map());
@@ -402,7 +436,7 @@ function PlayView({
   const laneFieldRef = useRef<HTMLDivElement | null>(null);
   const activeTouchesRef = useRef<Map<number, TouchInputState>>(new Map());
   const touchStartQueueRef = useRef<TouchStartInput[]>([]);
-  const touchBatchRafRef = useRef<number | null>(null);
+  const touchBatchTimerRef = useRef<number | null>(null);
   const lastTouchReleaseMsRef = useRef<number | null>(null);
 
   const chartDuration = chart.meta.durationMs;
@@ -426,8 +460,8 @@ function PlayView({
   );
   const judgementWindowNotes = useMemo(
     () => playableNotes.filter((note) => (
-      getNoteEndTimeMs(note) >= chartMs - HIT_WINDOW_MS * 2
-      && note.timeMs <= chartMs + HIT_WINDOW_MS
+      getNoteEndTimeMs(note) >= chartMs - HIT_WINDOW_MS * 2 - MAX_INPUT_OFFSET_MS
+      && note.timeMs <= chartMs + HIT_WINDOW_MS + MAX_INPUT_OFFSET_MS
     )),
     [chartMs, playableNotes],
   );
@@ -485,7 +519,11 @@ function PlayView({
       return Math.min(calibrationActive ? calibrationDurationMs : chartDuration, Math.max(0, currentMs));
     }
     const audio = audioRef.current;
-    const next = audio ? audio.currentTime * 1000 : performance.now() - startAtRef.current;
+    const next = calibrationActive
+      ? performance.now() - startAtRef.current
+      : audio
+        ? audio.currentTime * 1000
+        : performance.now() - startAtRef.current;
     return Math.min(calibrationActive ? calibrationDurationMs : chartDuration, Math.max(0, next));
   }, [calibrationActive, calibrationDurationMs, chartDuration, currentMs]);
 
@@ -498,9 +536,9 @@ function PlayView({
     activeTouchesRef.current.clear();
     touchStartQueueRef.current = [];
     lastTouchReleaseMsRef.current = null;
-    if (touchBatchRafRef.current !== null) {
-      cancelAnimationFrame(touchBatchRafRef.current);
-      touchBatchRafRef.current = null;
+    if (touchBatchTimerRef.current !== null) {
+      window.clearTimeout(touchBatchTimerRef.current);
+      touchBatchTimerRef.current = null;
     }
   }, []);
 
@@ -590,6 +628,7 @@ function PlayView({
     setStats(INITIAL_STATS);
     setJudgeBursts([]);
     forcedResumeMsRef.current = 0;
+    pendingCalibrationStartRef.current = false;
     const audio = audioRef.current;
     if (audio) {
       audio.pause();
@@ -626,6 +665,7 @@ function PlayView({
   }, [chartDuration, stopRaf, tick]);
 
   const startGame = useCallback(() => {
+    prewarmKeySoundAudioContext();
     resetRun();
     pendingGameStartRef.current = true;
     setPlayPhase("game");
@@ -633,6 +673,12 @@ function PlayView({
 
   const returnToMenu = useCallback(() => {
     resetRun();
+    setPlayPhase("menu");
+  }, [resetRun]);
+
+  const cancelTouchCalibration = useCallback(() => {
+    resetRun();
+    setMenuStatus("触摸校准已取消");
     setPlayPhase("menu");
   }, [resetRun]);
 
@@ -700,6 +746,14 @@ function PlayView({
   }, [playPhase, startPlaybackFrom]);
 
   useEffect(() => {
+    if (playPhase !== "game" || !calibrationActive || !pendingCalibrationStartRef.current) return;
+    pendingCalibrationStartRef.current = false;
+    startAtRef.current = performance.now();
+    setIsPlaying(true);
+    animationRef.current = requestAnimationFrame(tick);
+  }, [calibrationActive, playPhase, tick]);
+
+  useEffect(() => {
     if (!showPauseMenu) return;
     stopRaf();
     setIsPlaying(false);
@@ -714,10 +768,17 @@ function PlayView({
     audioRef.current?.pause();
     if (calibrationActive) {
       setCalibrationActive(false);
+      setCalibrationSamples([]);
+      setCurrentMs(0);
+      clearTouchInputs();
+      setActiveLaneIds(new Set());
+      setMenuStatus("触摸校准超时，请重试");
+      setPlayPhase("menu");
     }
-  }, [calibrationActive, calibrationDurationMs, chartDuration, currentMs, isPlaying, stopRaf]);
+  }, [calibrationActive, calibrationDurationMs, chartDuration, clearTouchInputs, currentMs, isPlaying, stopRaf]);
 
   const startCalibration = useCallback(() => {
+    prewarmKeySoundAudioContext();
     stopRaf();
     audioRef.current?.pause();
     setCalibrationActive(true);
@@ -737,10 +798,10 @@ function PlayView({
     clearTouchInputs();
     setActiveLaneIds(new Set());
     setCurrentMs(0);
-    startAtRef.current = performance.now();
-    setIsPlaying(true);
-    animationRef.current = requestAnimationFrame(tick);
-  }, [chart, clearHoldRunState, clearTouchInputs, stopRaf, tick]);
+    setMenuStatus("触摸校准中：点击中央轨道上的 15 个音符");
+    pendingCalibrationStartRef.current = true;
+    setPlayPhase("game");
+  }, [chart, clearHoldRunState, clearTouchInputs, stopRaf]);
 
   useEffect(() => {
     return stopRaf;
@@ -952,13 +1013,12 @@ function PlayView({
   }, [activeLanes, autoplay, calibrationActive, chart.lanes.length, chartLaneIndexById, chartMs, getTouchHoldSnapshot, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, scoreUnit]);
 
   const processTouchStartBatch = useCallback(() => {
-    touchBatchRafRef.current = null;
+    touchBatchTimerRef.current = null;
     const starts = touchStartQueueRef.current;
     touchStartQueueRef.current = [];
     if (!starts.length || playPhase !== "game" || showPauseMenu) return;
 
     const liveMs = readPlayheadMs();
-    const liveChartMs = calibrationActive ? liveMs : liveMs - offsetMs;
     setCurrentMs(liveMs);
 
     if (calibrationActive) {
@@ -967,7 +1027,7 @@ function PlayView({
 
       const nextIndex = calibrationSamples.length;
       const targetTimeMs = CALIBRATION_FIRST_TAP_MS + nextIndex * CALIBRATION_INTERVAL_MS;
-      const offset = liveMs - targetTimeMs;
+      const offset = touch.inputChartMs - targetTimeMs;
       if (nextIndex < CALIBRATION_TAP_COUNT && Math.abs(offset) <= CALIBRATION_HIT_WINDOW_MS) {
         const note: Note = {
           id: `calibration-${nextIndex}`,
@@ -980,12 +1040,17 @@ function PlayView({
         showJudgeBurst(note, "great", setJudgeBursts);
         playKeySound(touch.laneIndex ?? Math.floor(activeLanes.length / 2), false, keyVolume);
         if (nextSamples.length >= CALIBRATION_TAP_COUNT) {
-          const nextOffset = Math.round(getMedian(nextSamples));
-          onOffsetChange(nextOffset);
+          const nextOffset = clampInputOffsetMs(Math.round(getMedian(nextSamples)));
+          onTouchOffsetChange(nextOffset);
           setCalibrationResultMs(nextOffset);
           setCalibrationActive(false);
           setIsPlaying(false);
           stopRaf();
+          setCurrentMs(0);
+          clearTouchInputs();
+          setActiveLaneIds(new Set());
+          setMenuStatus(`触摸校准完成：${nextOffset}ms，可继续手动微调`);
+          setPlayPhase("menu");
         }
       }
       return;
@@ -996,7 +1061,7 @@ function PlayView({
     const matches: Array<{ note: Note; result: JudgeResult }> = [];
     const startedHoldTickMatches: Array<{ note: Note; tickId: string; result: JudgeResult }> = [];
 
-    const findClosestLaneStartNote = (predicate: (note: Note) => boolean) => judgementWindowNotes
+    const findClosestLaneStartNote = (inputChartMs: number, predicate: (note: Note) => boolean) => judgementWindowNotes
       .filter((note) => {
         if (unavailableNoteIds.has(note.id) || !predicate(note)) return false;
         if (note.type !== "hold") return true;
@@ -1004,19 +1069,19 @@ function PlayView({
           && !startedHoldIdsRef.current.has(note.id)
           && !failedHoldIdsRef.current.has(note.id);
       })
-      .map((note) => ({ note, offset: liveChartMs - note.timeMs }))
+      .map((note) => ({ note, offset: inputChartMs - note.timeMs }))
       .filter(({ offset }) => Math.abs(offset) <= HIT_WINDOW_MS)
       .sort((a, b) => Math.abs(a.offset) - Math.abs(b.offset))[0];
 
-    const findClosestInstantNote = (predicate: (note: Note) => boolean) => judgementWindowNotes
+    const findClosestInstantNote = (inputChartMs: number, predicate: (note: Note) => boolean) => judgementWindowNotes
       .filter((note) => !unavailableNoteIds.has(note.id) && note.type !== "hold" && predicate(note))
-      .map((note) => ({ note, offset: liveChartMs - note.timeMs }))
+      .map((note) => ({ note, offset: inputChartMs - note.timeMs }))
       .filter(({ offset }) => Math.abs(offset) <= HIT_WINDOW_MS)
       .sort((a, b) => Math.abs(a.offset) - Math.abs(b.offset))[0];
 
     starts.forEach((touch) => {
       if (touch.laneId === undefined || consumedPointers.has(touch.pointerId)) return;
-      const target = findClosestLaneStartNote((note) => !note.isSpace && note.laneId === touch.laneId);
+      const target = findClosestLaneStartNote(touch.inputChartMs, (note) => !note.isSpace && note.laneId === touch.laneId);
       if (!target) return;
       consumedPointers.add(touch.pointerId);
       const result = getJudgeResult(target.offset);
@@ -1038,7 +1103,7 @@ function PlayView({
     const matchedSpaceLaneIds = new Set<string>();
     starts.forEach((touch) => {
       if (!touch.side || consumedPointers.has(touch.pointerId)) return;
-      const target = findClosestInstantNote((note) => (
+      const target = findClosestInstantNote(touch.inputChartMs, (note) => (
         isSpaceTapSide(note, touch.side as SpaceSide)
         && getSpaceProjection(note, activeLanes, chartLaneIndexById).isJudgeable
       ));
@@ -1080,14 +1145,14 @@ function PlayView({
     calibrationLane,
     calibrationSamples,
     chartLaneIndexById,
+    clearTouchInputs,
     isPlaying,
     judgedHoldTickIds,
     judgedIds,
     judgementWindowNotes,
     keyVolume,
     markHoldStarted,
-    offsetMs,
-    onOffsetChange,
+    onTouchOffsetChange,
     playPhase,
     readPlayheadMs,
     scoreUnit,
@@ -1097,8 +1162,8 @@ function PlayView({
   ]);
 
   const scheduleTouchStartBatch = useCallback(() => {
-    if (touchBatchRafRef.current !== null) return;
-    touchBatchRafRef.current = requestAnimationFrame(processTouchStartBatch);
+    if (touchBatchTimerRef.current !== null) return;
+    touchBatchTimerRef.current = window.setTimeout(processTouchStartBatch, TOUCH_BATCH_MS);
   }, [processTouchStartBatch]);
 
   const handleStagePointerDown = useCallback((event: ReactPointerEvent<HTMLElement>) => {
@@ -1108,16 +1173,18 @@ function PlayView({
     event.currentTarget.setPointerCapture(event.pointerId);
 
     const { liveChartMs } = getLiveTimes();
+    const eventChartMs = getPointerEventChartMs(event.timeStamp, liveChartMs);
+    const inputChartMs = calibrationActive ? eventChartMs : eventChartMs - touchOffsetMs;
     const touch = updateTouchLaneState(
       {
         pointerId: event.pointerId,
         x: event.clientX,
         y: event.clientY,
-        startedAtMs: liveChartMs,
+        startedAtMs: inputChartMs,
       },
       event.clientX,
       event.clientY,
-      liveChartMs,
+      inputChartMs,
     );
     activeTouchesRef.current.set(event.pointerId, touch);
     lastTouchReleaseMsRef.current = null;
@@ -1131,13 +1198,14 @@ function PlayView({
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
+      inputChartMs,
       laneId: touch.laneId,
       laneIndex: touch.laneIndex,
       side: getTouchSpaceSide(event.clientX),
     });
     updateTouchFeedback();
     scheduleTouchStartBatch();
-  }, [getLiveTimes, isPlaying, playPhase, scheduleTouchStartBatch, showPauseMenu, togglePlay, updateTouchFeedback, updateTouchLaneState]);
+  }, [calibrationActive, getLiveTimes, isPlaying, playPhase, scheduleTouchStartBatch, showPauseMenu, togglePlay, touchOffsetMs, updateTouchFeedback, updateTouchLaneState]);
 
   const handleStagePointerMove = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     if (!isTouchPointerEvent(event)) return;
@@ -1145,25 +1213,33 @@ function PlayView({
     if (!touch) return;
     event.preventDefault();
     const { liveChartMs } = getLiveTimes();
-    activeTouchesRef.current.set(event.pointerId, updateTouchLaneState(touch, event.clientX, event.clientY, liveChartMs));
+    const eventChartMs = getPointerEventChartMs(event.timeStamp, liveChartMs);
+    const inputChartMs = calibrationActive ? eventChartMs : eventChartMs - touchOffsetMs;
+    activeTouchesRef.current.set(event.pointerId, updateTouchLaneState(touch, event.clientX, event.clientY, inputChartMs));
     updateTouchFeedback();
-  }, [getLiveTimes, updateTouchFeedback, updateTouchLaneState]);
+  }, [calibrationActive, getLiveTimes, touchOffsetMs, updateTouchFeedback, updateTouchLaneState]);
 
   const finishStagePointer = useCallback((event: ReactPointerEvent<HTMLElement>, cancelQueuedStart = false) => {
     if (!isTouchPointerEvent(event)) return;
     const hadTouch = activeTouchesRef.current.delete(event.pointerId);
     if (cancelQueuedStart) {
       touchStartQueueRef.current = touchStartQueueRef.current.filter((touch) => touch.pointerId !== event.pointerId);
+      if (!touchStartQueueRef.current.length && touchBatchTimerRef.current !== null) {
+        window.clearTimeout(touchBatchTimerRef.current);
+        touchBatchTimerRef.current = null;
+      }
     }
     if (hadTouch && activeTouchesRef.current.size === 0) {
-      lastTouchReleaseMsRef.current = getLiveTimes().liveChartMs;
+      const { liveChartMs } = getLiveTimes();
+      const eventChartMs = getPointerEventChartMs(event.timeStamp, liveChartMs);
+      lastTouchReleaseMsRef.current = calibrationActive ? eventChartMs : eventChartMs - touchOffsetMs;
       activeSpaceLaneIdsRef.current = [];
     }
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
     updateTouchFeedback();
-  }, [getLiveTimes, updateTouchFeedback]);
+  }, [calibrationActive, getLiveTimes, touchOffsetMs, updateTouchFeedback]);
 
   const handleStagePointerUp = useCallback((event: ReactPointerEvent<HTMLElement>) => {
     finishStagePointer(event);
@@ -1184,6 +1260,10 @@ function PlayView({
       if (playPhase !== "game") return;
       if (code === "Escape") {
         event.preventDefault();
+        if (calibrationActive) {
+          cancelTouchCalibration();
+          return;
+        }
         if (showPauseMenu) {
           resumeFromPause();
         } else {
@@ -1194,8 +1274,9 @@ function PlayView({
       if (showPauseMenu) return;
       if (ignored) return;
       event.preventDefault();
+      if (calibrationActive) return;
       const liveMs = isPlaying ? readPlayheadMs() : currentMs;
-      const liveChartMs = calibrationActive ? liveMs : liveMs - offsetMs;
+      const liveChartMs = liveMs - offsetMs;
       if (!event.repeat) {
         keyPressTimesRef.current.set(code, liveChartMs);
       }
@@ -1207,35 +1288,6 @@ function PlayView({
       if (!isSpaceKey && !spaceInputSide && !lane) return;
 
       updateTouchFeedback();
-
-      if (calibrationActive) {
-        if (!event.repeat && calibrationLane && lane?.id === calibrationLane.id) {
-          const nextIndex = calibrationSamples.length;
-          const targetTimeMs = CALIBRATION_FIRST_TAP_MS + nextIndex * CALIBRATION_INTERVAL_MS;
-          const offset = liveMs - targetTimeMs;
-          if (nextIndex < CALIBRATION_TAP_COUNT && Math.abs(offset) <= CALIBRATION_HIT_WINDOW_MS) {
-            const note: Note = {
-              id: `calibration-${nextIndex}`,
-              timeMs: targetTimeMs,
-              laneId: calibrationLane.id,
-              type: "tap",
-            };
-            const nextSamples = [...calibrationSamples, Math.round(offset)];
-            setCalibrationSamples(nextSamples);
-            showJudgeBurst(note, "great", setJudgeBursts);
-            playKeySound(lane.index, false, keyVolume);
-            if (nextSamples.length >= CALIBRATION_TAP_COUNT) {
-              const nextOffset = Math.round(getMedian(nextSamples));
-              onOffsetChange(nextOffset);
-              setCalibrationResultMs(nextOffset);
-              setCalibrationActive(false);
-              setIsPlaying(false);
-              stopRaf();
-            }
-          }
-        }
-        return;
-      }
 
       if (!isPlaying) {
         setShowPauseMenu(false);
@@ -1316,7 +1368,7 @@ function PlayView({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [activeLanes, calibrationActive, calibrationLane, calibrationSamples, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, markHoldStarted, onOffsetChange, openPauseMenu, playPhase, readPlayheadMs, resumeFromPause, showPauseMenu, stopRaf, togglePlay, scoreUnit, updateTouchFeedback]);
+  }, [activeLanes, calibrationActive, cancelTouchCalibration, chart.lanes.length, chartLaneIndexById, currentMs, offsetMs, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, markHoldStarted, openPauseMenu, playPhase, readPlayheadMs, resumeFromPause, showPauseMenu, togglePlay, scoreUnit, updateTouchFeedback]);
 
   const approachingLaneIds = useMemo(() => {
     const next = new Set<string>();
@@ -1394,12 +1446,16 @@ function PlayView({
             noteSpeed={noteSpeed}
             noteSize={noteSize}
             offsetMs={offsetMs}
+            touchOffsetMs={touchOffsetMs}
             autoplay={autoplay}
+            calibrationResultMs={calibrationResultMs}
             onMusicVolumeChange={onMusicVolumeChange}
             onKeyVolumeChange={onKeyVolumeChange}
             onNoteSpeedChange={onNoteSpeedChange}
             onNoteSizeChange={onNoteSizeChange}
             onOffsetChange={onOffsetChange}
+            onTouchOffsetChange={onTouchOffsetChange}
+            onStartTouchCalibration={startCalibration}
             onAutoplayChange={onAutoplayChange}
           />
         </section>
@@ -1420,9 +1476,17 @@ function PlayView({
         onPointerCancel={handleStagePointerCancel}
         onLostPointerCapture={handleStageLostPointerCapture}
       >
-        <button className="pause-toggle" onClick={openPauseMenu}>
-          Pause
+        <button className="pause-toggle" onClick={calibrationActive ? cancelTouchCalibration : openPauseMenu}>
+          {calibrationActive ? "Cancel" : "Pause"}
         </button>
+
+        {calibrationActive ? (
+          <div className="calibration-readout" role="status">
+            <span>Touch calibration</span>
+            <strong>{calibrationSamples.length} / {CALIBRATION_TAP_COUNT}</strong>
+            <small>Tap the center lane when each note reaches the line</small>
+          </div>
+        ) : null}
 
         <aside className="play-song-hud">
           <div className="score-readout">
@@ -4204,6 +4268,14 @@ function getTouchSpaceSide(x: number): SpaceSide | undefined {
   return undefined;
 }
 
+function getPointerEventChartMs(eventTimeStamp: number, liveChartMs: number) {
+  const eventAgeMs = performance.now() - eventTimeStamp;
+  if (!Number.isFinite(eventAgeMs) || eventAgeMs < 0 || eventAgeMs > 1000) {
+    return liveChartMs;
+  }
+  return liveChartMs - eventAgeMs;
+}
+
 function getTouchLaneTargetFromPoint(
   x: number,
   y: number,
@@ -4628,6 +4700,10 @@ function getMedian(values: number[]) {
   return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
+function clampInputOffsetMs(value: number) {
+  return Math.min(MAX_INPUT_OFFSET_MS, Math.max(-MAX_INPUT_OFFSET_MS, Number.isFinite(value) ? Math.round(value) : 0));
+}
+
 interface ChartKeySoundEvent {
   id: string;
   timeMs: number;
@@ -4796,6 +4872,13 @@ function getKeySoundAudioContext() {
   const AudioContextConstructor = window.AudioContext || audioWindow.webkitAudioContext;
   if (!AudioContextConstructor) return undefined;
   return getKeySoundContext(AudioContextConstructor);
+}
+
+function prewarmKeySoundAudioContext() {
+  const context = getKeySoundAudioContext();
+  if (context?.state === "suspended") {
+    void context.resume().catch(() => undefined);
+  }
 }
 
 function playFallbackKeySound(laneIndex: number, isSpace = false, volume = 1) {

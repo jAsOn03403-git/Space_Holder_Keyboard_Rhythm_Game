@@ -297,6 +297,50 @@ button.primary {
   gap: 0.65rem;
 }
 
+.touch-calibration-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.touch-calibration-control button {
+  min-width: 0;
+}
+
+.touch-calibration-control span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.calibration-readout {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  z-index: 12;
+  display: grid;
+  justify-items: center;
+  gap: 0.1rem;
+  width: min(24rem, calc(100% - 10rem));
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.calibration-readout span,
+.calibration-readout small {
+  color: var(--muted);
+}
+
+.calibration-readout strong {
+  font-size: 1.35rem;
+}
+
+.calibration-readout small {
+  font-size: 0.72rem;
+  text-align: center;
+}
+
 .pause-overlay {
   position: absolute;
   inset: 0;
@@ -527,7 +571,7 @@ button.primary {
   background:
     linear-gradient(180deg, rgba(121, 231, 242, 0.05), transparent 52%),
     rgba(255, 255, 255, 0.025);
-  transition: background 120ms ease, box-shadow 120ms ease;
+  transition: background 45ms linear, box-shadow 45ms linear;
 }
 
 .lane:first-child {
