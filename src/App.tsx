@@ -3078,15 +3078,12 @@ function Timeline({
     anchorLaneIndex: placement.anchorLaneIndex,
     span: clampSpaceSpan(spaceSpan),
   });
-  const finalizePendingSpaceHold = (endPlacement?: PlacementTarget) => {
-    const pathSource = endPlacement && pendingHoldStart?.isSpace
-      ? [...(pendingHoldStart.pathPoints ?? [makeSpacePathPoint(pendingHoldStart)]), makeSpacePathPoint(endPlacement)]
-      : pendingHoldStart?.pathPoints;
-    if (!pendingHoldStart?.isSpace || !pathSource || pathSource.length < 2) {
+  const finalizePendingSpaceHold = () => {
+    if (!pendingHoldStart?.isSpace || !pendingHoldStart.pathPoints || pendingHoldStart.pathPoints.length < 2) {
       setPendingHoldStart(null);
       return;
     }
-    const pathPoints = normalizeSpacePath(pathSource.slice(0, 2), duration);
+    const pathPoints = normalizeSpacePath(pendingHoldStart.pathPoints, duration);
     const range = getSpacePathTimeRange({
       id: "pending-space-path",
       laneId: pendingHoldStart.laneId,
@@ -3232,7 +3229,12 @@ function Timeline({
         }
 
         if (isSpacePlacement) {
-          finalizePendingSpaceHold(placement);
+          const nextPathPoints = [...(pendingHoldStart.pathPoints ?? [makeSpacePathPoint(pendingHoldStart)]), makeSpacePathPoint(placement)];
+          setPendingHoldStart({
+            ...pendingHoldStart,
+            timeMs: Math.min(pendingHoldStart.timeMs, placement.timeMs),
+            pathPoints: nextPathPoints,
+          });
           return;
         }
 
@@ -3328,7 +3330,7 @@ function Timeline({
           const isGhostPreview = isSpacePreview && !spaceStartHasOverlap(previewSource.anchorLaneIndex, spaceSpan, displayLanes);
           if (isSpacePreview && isHoldPreview && pendingHoldStart?.pathPoints?.length) {
             const hoverPoint = makeSpacePathPoint(hoverPreview);
-            const pathPoints = normalizeSpacePath([pendingHoldStart.pathPoints[0], hoverPoint], duration);
+            const pathPoints = normalizeSpacePath([...pendingHoldStart.pathPoints, hoverPoint], duration);
             const previewNote: Note = {
               id: "space-path-preview",
               laneId: pendingHoldStart.laneId,
@@ -3526,32 +3528,9 @@ function SpacePathNoteBlock({
   judged: boolean;
   context: "play" | "editor";
 }) {
-  const points = getSpacePathPoints(note);
-  const range = getSpacePathTimeRange(note);
-  const firstPoint = points[0];
-  const segments = getSpacePathSegments(note, currentMs, fallMs, timingGroup, lanes, judgeLinePercent);
-  if (!segments.length) return null;
+  const polygons = getSpacePathPolygons(note, currentMs, fallMs, timingGroup, lanes, judgeLinePercent);
+  if (!polygons.length) return null;
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (dimmed ? 0.42 : 1);
-  if (isVerticalSpacePath(points) && firstPoint) {
-    const laneIndex = firstPoint.anchorLaneIndex - getLanePhysicalStartIndex(lanes);
-    const placement = getSpacePlacementFromStartIndex(laneIndex, lanes.length, firstPoint.span);
-    const headTop = getNoteTopPercentRaw(range.startMs, currentMs, fallMs, timingGroup, judgeLinePercent);
-    const tailTop = getNoteTopPercentRaw(range.endMs, currentMs, fallMs, timingGroup, judgeLinePercent);
-    return (
-      <span
-        className={`${context === "editor" ? "timeline-note" : "note-block"} space-note hold-note space-path-vertical ${selected ? "selected-note" : ""} ${moving ? "moving-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""}`}
-        style={{
-          top: `${Math.min(headTop, tailTop)}%`,
-          left: `${placement.left}%`,
-          width: `${placement.width}%`,
-          height: `${Math.abs(tailTop - headTop)}%`,
-          minHeight: 0,
-          transform: "none",
-          opacity,
-        }}
-      />
-    );
-  }
 
   return (
     <svg
@@ -3561,12 +3540,8 @@ function SpacePathNoteBlock({
       style={{ opacity }}
       aria-hidden="true"
     >
-      {segments.map((segment, index) => (
-        <Fragment key={`${note.id}-space-path-${index}`}>
-          <polygon points={segment.points} />
-          <ellipse cx={segment.startX} cy={segment.startY} rx={segment.startRadiusX} ry={segment.radiusY} />
-          <ellipse cx={segment.endX} cy={segment.endY} rx={segment.endRadiusX} ry={segment.radiusY} />
-        </Fragment>
+      {polygons.map((points, index) => (
+        <polygon key={`${note.id}-space-path-${index}`} points={points} />
       ))}
     </svg>
   );
@@ -4117,7 +4092,7 @@ function getSpacePathPoints(note: Note): SpacePathPoint[] {
       span: clampSpaceSpan(point.span ?? note.span ?? 1),
     }));
 
-  if (points.length >= 2) return points.slice(0, 2);
+  if (points.length >= 2) return points;
 
   return [
     fallbackStart,
@@ -4182,15 +4157,6 @@ function getSpacePathPointAtTime(note: Note, timeMs: number) {
   }
 
   return nearest;
-}
-
-function isVerticalSpacePath(points: SpacePathPoint[]) {
-  if (points.length < 2) return false;
-  const first = points[0];
-  return points.every((point) => (
-    point.anchorLaneIndex === first.anchorLaneIndex
-    && clampSpaceSpan(point.span) === clampSpaceSpan(first.span)
-  ));
 }
 
 function getNoteEndTimeMs(note: Note) {
@@ -4816,7 +4782,7 @@ function getSpaceNoteAtTime(note: Note, timeMs: number): Note {
   };
 }
 
-function getSpacePathSegments(
+function getSpacePathPolygons(
   note: Note,
   currentMs: number,
   fallMs: number,
@@ -4834,34 +4800,22 @@ function getSpacePathSegments(
     return {
       left: (localStart / laneCount) * 100,
       right: ((localStart + span) / laneCount) * 100,
-      center: ((localStart + span / 2) / laneCount) * 100,
-      radiusX: (span / laneCount) * 50,
-      top: getNoteTopPercentRaw(point.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent),
+      top: getNoteTopPercent(point.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent),
     };
   };
 
   return points.slice(0, -1).map((point, index) => {
     const start = toCanvasPoint(point);
     const end = toCanvasPoint(points[index + 1]);
-    const horizontalPadding = start.top === end.top ? 0.52 : 0;
-    const startTop = start.top - horizontalPadding;
-    const endTop = end.top + horizontalPadding;
-    const polygonPoints = [
+    const horizontalPadding = start.top === end.top ? 0.45 : 0;
+    const startTop = Math.max(-12, Math.min(112, start.top - horizontalPadding));
+    const endTop = Math.max(-12, Math.min(112, end.top + horizontalPadding));
+    return [
       `${roundCssNumber(start.left)},${roundCssNumber(startTop)}`,
       `${roundCssNumber(start.right)},${roundCssNumber(startTop)}`,
       `${roundCssNumber(end.right)},${roundCssNumber(endTop)}`,
       `${roundCssNumber(end.left)},${roundCssNumber(endTop)}`,
     ].join(" ");
-    return {
-      points: polygonPoints,
-      startX: roundCssNumber(start.center),
-      startY: roundCssNumber(start.top),
-      endX: roundCssNumber(end.center),
-      endY: roundCssNumber(end.top),
-      startRadiusX: roundCssNumber(start.radiusX),
-      endRadiusX: roundCssNumber(end.radiusX),
-      radiusY: roundCssNumber(Math.max(0.42, horizontalPadding || 0.5)),
-    };
   });
 }
 

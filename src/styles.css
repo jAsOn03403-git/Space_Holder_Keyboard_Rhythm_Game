@@ -685,8 +685,7 @@ button.primary {
   transition: opacity 120ms ease, filter 120ms ease;
 }
 
-.note-space-path polygon,
-.note-space-path ellipse {
+.note-space-path polygon {
   fill: rgba(255, 207, 92, 0.78);
   stroke: rgba(255, 247, 204, 0.5);
   stroke-width: 0.18;
@@ -1458,8 +1457,7 @@ button.primary {
   pointer-events: none;
 }
 
-.timeline-space-path polygon,
-.timeline-space-path ellipse {
+.timeline-space-path polygon {
   fill: rgba(255, 207, 92, 0.64);
   stroke: rgba(255, 247, 204, 0.45);
   stroke-width: 0.18;
@@ -1472,8 +1470,7 @@ button.primary {
   filter: drop-shadow(0 0 0.9rem rgba(230, 255, 119, 0.5));
 }
 
-.timeline-space-path.selected-note polygon,
-.timeline-space-path.selected-note ellipse {
+.timeline-space-path.selected-note polygon {
   stroke: rgba(230, 255, 119, 0.95);
   stroke-width: 0.34;
 }
