@@ -676,6 +676,23 @@ button.primary {
   box-shadow: inset 0 0 0 1px rgba(255, 247, 204, 0.28), 0 0 24px rgba(255, 207, 92, 0.7), 0 0 8px rgba(255, 247, 204, 0.34);
 }
 
+.note-space-path {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  transition: opacity 120ms ease, filter 120ms ease;
+}
+
+.note-space-path polygon {
+  fill: rgba(255, 207, 92, 0.78);
+  stroke: rgba(255, 247, 204, 0.5);
+  stroke-width: 0.18;
+  filter: drop-shadow(0 0 0.62rem rgba(255, 207, 92, 0.54));
+  vector-effect: non-scaling-stroke;
+}
+
 .note-block.hold-note.hold-dimmed {
   opacity: 0.38;
   filter: saturate(0.55);
@@ -1430,6 +1447,36 @@ button.primary {
   background:
     linear-gradient(180deg, rgba(255, 247, 204, 0.52), rgba(255, 207, 92, 0.84) 16%, rgba(255, 207, 92, 0.24));
   box-shadow: inset 0 0 0 1px rgba(255, 247, 204, 0.14), 0 0 14px rgba(255, 207, 92, 0.36);
+}
+
+.timeline-space-path {
+  position: absolute;
+  z-index: 3;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.timeline-space-path polygon {
+  fill: rgba(255, 207, 92, 0.64);
+  stroke: rgba(255, 247, 204, 0.45);
+  stroke-width: 0.18;
+  filter: drop-shadow(0 0 0.45rem rgba(255, 207, 92, 0.32));
+  vector-effect: non-scaling-stroke;
+}
+
+.timeline-space-path.selected-note {
+  z-index: 10;
+  filter: drop-shadow(0 0 0.9rem rgba(230, 255, 119, 0.5));
+}
+
+.timeline-space-path.selected-note polygon {
+  stroke: rgba(230, 255, 119, 0.95);
+  stroke-width: 0.34;
+}
+
+.timeline-space-path.moving-note {
+  opacity: 0.72;
 }
 
 .timeline-note.space-note.ghost-space {
