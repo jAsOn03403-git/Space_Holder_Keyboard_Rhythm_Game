@@ -3,12 +3,6 @@ export type HoldDensityPosition = "head" | "middle" | "tail";
 export type SpaceSide = "left" | "right";
 export type TimingEventType = "speed" | "freeze" | "opacity" | "line";
 
-export interface SpacePathPoint {
-  timeMs: number;
-  anchorLaneIndex: number;
-  span: number;
-}
-
 export interface SongMeta {
   title: string;
   artist?: string;
@@ -43,7 +37,6 @@ export interface Note {
   durationMs?: number;
   holdDensity?: number;
   holdDensityPosition?: HoldDensityPosition;
-  spacePath?: SpacePathPoint[];
   judged?: boolean;
   result?: JudgeResult;
 }

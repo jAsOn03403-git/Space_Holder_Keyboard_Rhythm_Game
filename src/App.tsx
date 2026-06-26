@@ -1,6 +1,6 @@
 ﻿import { ChangeEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlayStats, SpacePathPoint, SpaceSide, TimingEvent, TimingEventType, TimingGroup } from "./types";
+import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlayStats, SpaceSide, TimingEvent, TimingEventType, TimingGroup } from "./types";
 import { DEFAULT_TIMING_GROUP_ID, assignDefaultTimingGroup, createDefaultTimingGroups, createManualChart, createStarterChart, getJudgeResult, normalizeTimingGroups, rebuildChartGrid, sanitizeBpm } from "./lib/charting";
 import { clampLaneCount, findLaneForKey, getKeyboardSegments, getPlayableCodeIndex, shouldIgnoreKey } from "./lib/keyboard";
 
@@ -857,12 +857,11 @@ function PlayView({
   useEffect(() => {
     if (!activeTouchesRef.current.size) return;
     const { liveChartMs } = getLiveTimes();
-    const inputChartMs = calibrationActive ? liveChartMs : liveChartMs - touchOffsetMs;
     activeTouchesRef.current.forEach((touch, pointerId) => {
-      activeTouchesRef.current.set(pointerId, updateTouchLaneState(touch, touch.x, touch.y, inputChartMs));
+      activeTouchesRef.current.set(pointerId, updateTouchLaneState(touch, touch.x, touch.y, liveChartMs));
     });
     updateTouchFeedback();
-  }, [activeLanes, calibrationActive, getLiveTimes, touchOffsetMs, updateTouchFeedback, updateTouchLaneState]);
+  }, [activeLanes, getLiveTimes, updateTouchFeedback, updateTouchLaneState]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -943,20 +942,21 @@ function PlayView({
     if (!isPlaying) return;
     if (calibrationActive) return;
 
-    const dueTicks: Array<{ note: Note; tickId: string; timeMs: number; judgeable: boolean }> = [];
+    const dueTicks: Array<{ note: Note; tickId: string; timeMs: number }> = [];
     judgementWindowNotes.forEach((note) => {
       if (note.type !== "hold" || judgedIds.has(note.id)) return;
       if (!note.isSpace && failedHoldIdsRef.current.has(note.id)) return;
       if (!note.isSpace && !autoplay && !startedHoldIdsRef.current.has(note.id)) return;
+      if (note.isSpace && !getSpaceProjection(note, activeLanes, chartLaneIndexById).isJudgeable) {
+        if (chartMs >= getNoteEndTimeMs(note)) {
+          setJudgedIds((previous) => new Set(previous).add(note.id));
+        }
+        return;
+      }
       getHoldDensityTimes(note).forEach((timeMs, tickIndex) => {
         const tickId = getHoldTickId(note, tickIndex);
         if (!judgedHoldTickIds.has(tickId) && chartMs >= timeMs) {
-          dueTicks.push({
-            note,
-            tickId,
-            timeMs,
-            judgeable: !note.isSpace || getSpaceProjection(note, activeLanes, chartLaneIndexById, timeMs).isJudgeable,
-          });
+          dueTicks.push({ note, tickId, timeMs });
         }
       });
     });
@@ -964,11 +964,7 @@ function PlayView({
     const nextTickIds = new Set(judgedHoldTickIds);
     const judgedTickResults: Array<{ note: Note; result: JudgeResult }> = [];
     const playedKeySounds = new Set<string>();
-    dueTicks.forEach(({ note, tickId, timeMs, judgeable }) => {
-      if (!judgeable) {
-        nextTickIds.add(tickId);
-        return;
-      }
+    dueTicks.forEach(({ note, tickId, timeMs }) => {
       const input = autoplay
         ? { isHeld: true, isEligible: true, code: undefined, pressMs: undefined }
         : getHoldInputState(
@@ -986,10 +982,9 @@ function PlayView({
       }
       nextTickIds.add(tickId);
       const result: JudgeResult = input.isEligible ? "great" : "miss";
-      const displayNote = note.isSpace ? getSpaceNoteAtTime(note, timeMs) : note;
-      judgedTickResults.push({ note: displayNote, result });
+      judgedTickResults.push({ note, result });
       if (input.isEligible) {
-        playHitKeySoundOnce(note, activeLanes, chartLaneIndexById, keyVolume, playedKeySounds, timeMs);
+        playHitKeySoundOnce(note, activeLanes, chartLaneIndexById, keyVolume, playedKeySounds);
       }
     });
 
@@ -1388,12 +1383,8 @@ function PlayView({
   const approachingSpaceLaneIds = useMemo(() => {
     const next = new Set<string>();
     visiblePlayableNotes.forEach((note) => {
-      if (!note.isSpace || judgedIds.has(note.id)) return;
-      const approachingTimeMs = isSpaceHold(note)
-        ? getHoldDensityTimes(note).find((timeMs) => timeMs >= chartMs)
-        : note.timeMs;
-      if (approachingTimeMs !== undefined && approachingTimeMs >= chartMs && approachingTimeMs - chartMs <= 620) {
-        getSpannedLaneIds(note, activeLanes, chartLaneIndexById, approachingTimeMs).forEach((laneId) => next.add(laneId));
+      if (note.isSpace && !judgedIds.has(note.id) && note.timeMs >= chartMs && note.timeMs - chartMs <= 620) {
+        getSpannedLaneIds(note, activeLanes, chartLaneIndexById).forEach((laneId) => next.add(laneId));
       }
     });
     return next;
@@ -1547,41 +1538,21 @@ function PlayView({
               />
             ))
           ))}
-          {visibleSpaceNoteList.map((note) => {
-            const timingGroup = getTimingGroupForNote(note, timingGroups);
-            const dimmed = isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot());
-            if (isSpaceHold(note) && note.spacePath?.length) {
-              return (
-                <SpacePathNoteBlock
-                  key={note.id}
-                  note={note}
-                  currentMs={chartMs}
-                  fallMs={fallMs}
-                  timingGroup={timingGroup}
-                  judgeLinePercent={judgeLinePercent}
-                  lanes={activeLanes}
-                  judged={judgedIds.has(note.id)}
-                  dimmed={dimmed}
-                  context="play"
-                />
-              );
-            }
-            return (
-              <SpaceNoteBlock
-                key={note.id}
-                note={note}
-                currentMs={chartMs}
-                fallMs={fallMs}
-                timingGroup={timingGroup}
-                judgeLinePercent={judgeLinePercent}
-                laneCount={activeLanes.length}
-                projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
-                judged={judgedIds.has(note.id)}
-                caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
-                dimmed={dimmed}
-              />
-            );
-          })}
+          {visibleSpaceNoteList.map((note) => (
+            <SpaceNoteBlock
+              key={note.id}
+              note={note}
+              currentMs={chartMs}
+              fallMs={fallMs}
+              timingGroup={getTimingGroupForNote(note, timingGroups)}
+              judgeLinePercent={judgeLinePercent}
+              laneCount={activeLanes.length}
+              projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
+              judged={judgedIds.has(note.id)}
+              caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
+              dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
+            />
+          ))}
           {visibleLaneEventNotes.map((note) => (
             <LaneEventBlock
               key={note.id}
@@ -2020,11 +1991,7 @@ function EditorView({
   const updateSelectedSpaceSpan = (nextSpan: number) => {
     const safeSpan = clampSpaceSpan(nextSpan);
     setSpaceSpan(safeSpan);
-    updateSelectedNotes((note) => note.isSpace ? {
-      ...note,
-      span: safeSpan,
-      spacePath: note.spacePath?.map((point) => ({ ...point, span: safeSpan })),
-    } : note);
+    updateSelectedNotes((note) => note.isSpace ? { ...note, span: safeSpan } : note);
   };
 
   const updateSelectedHoldDensity = (nextDensity: number) => {
@@ -2041,24 +2008,7 @@ function EditorView({
   const updateSelectedHoldDuration = (nextDurationMs: number) => {
     const safeDurationMs = clampHoldDurationMs(nextDurationMs);
     setHoldDurationMs(safeDurationMs);
-    updateSelectedNotes((note) => {
-      if (note.type !== "hold") return note;
-      if (!isSpaceHold(note) || !note.spacePath?.length) {
-        return { ...note, durationMs: safeDurationMs };
-      }
-      const range = getSpacePathTimeRange(note);
-      const previousDuration = Math.max(1, range.endMs - range.startMs);
-      const nextPath = note.spacePath.map((point) => ({
-        ...point,
-        timeMs: Math.round(range.startMs + ((point.timeMs - range.startMs) / previousDuration) * safeDurationMs),
-      }));
-      return {
-        ...note,
-        timeMs: range.startMs,
-        durationMs: safeDurationMs,
-        spacePath: normalizeSpacePath(nextPath, chart.meta.durationMs),
-      };
-    });
+    updateSelectedNotes((note) => note.type === "hold" ? { ...note, durationMs: safeDurationMs } : note);
   };
 
   const updateSelectedLaneTargetCount = (nextLaneCount: number) => {
@@ -2159,8 +2109,9 @@ function EditorView({
     const offsetMs = Math.max(snapMs, endMs - startMs);
     const copied = selectedNotes
       .map((note) => ({
-        ...shiftNoteTime(note, offsetMs, chart.meta.durationMs, snapMs),
+        ...note,
         id: `copy-${Date.now()}-${note.id}`,
+        timeMs: snapTime(note.timeMs + offsetMs, snapMs, chart.meta.durationMs),
       }))
       .filter((note) => note.timeMs < chart.meta.durationMs);
     if (!copied.length) return;
@@ -2180,6 +2131,41 @@ function EditorView({
     });
   };
 
+  const splitSelectedSpaceHolds = () => {
+    const splitTargets = selectedNotes.filter((note) => note.isSpace && note.type === "hold");
+    if (!splitTargets.length) return;
+    const splitTargetIds = new Set(splitTargets.map((note) => note.id));
+    const created: Note[] = [];
+    splitTargets.forEach((note) => {
+      const densityTimes = getHoldDensityTimes(note);
+      const segmentDurationMs = clampHoldDurationMs(Math.min(Math.max(1, snapMs), Math.max(1, (note.durationMs ?? DEFAULT_HOLD_DURATION_MS) / (densityTimes.length + 1))));
+      densityTimes.forEach((timeMs, index) => {
+        created.push({
+          ...note,
+          id: `split-${Date.now()}-${note.id}-${index}`,
+          timeMs: snapTime(timeMs - segmentDurationMs / 2, snapMs, chart.meta.durationMs),
+          durationMs: segmentDurationMs,
+          holdDensity: 1,
+          holdDensityPosition: "middle",
+        });
+      });
+    });
+    onChartChange({
+      ...chart,
+      notes: [
+        ...chart.notes.filter((note) => !splitTargetIds.has(note.id)),
+        ...created,
+      ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId)),
+    });
+    setSelectedNoteIds(new Set(created.map((note) => note.id)));
+    if (created.length) {
+      setSelectionRange({
+        startMs: Math.min(...created.map((note) => note.timeMs)),
+        endMs: Math.max(...created.map((note) => getNoteEndTimeMs(note))),
+      });
+    }
+  };
+
   const moveSelectionTo = (nextStartMs: number, laneDelta = 0) => {
     if (!selectedNotes.length || selectionHeadTimeMs === undefined) return;
     const safeStartMs = snapTime(nextStartMs, snapMs, chart.meta.durationMs);
@@ -2189,7 +2175,7 @@ function EditorView({
       ...chart,
       notes: chart.notes
         .map((note) => selectedNoteIds.has(note.id)
-          ? shiftNoteLane(shiftNoteTime(note, deltaMs, chart.meta.durationMs, snapMs), chart.lanes, laneIndexById, laneDelta)
+          ? shiftNoteLane({ ...note, timeMs: snapTime(note.timeMs + deltaMs, snapMs, chart.meta.durationMs) }, chart.lanes, laneIndexById, laneDelta)
           : note)
         .sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId)),
     });
@@ -2213,31 +2199,14 @@ function EditorView({
     moveSelectionTo(nextStartMs);
   };
 
-  const toggleManualNote = (laneId: string, timeMs = editTimeMs, isSpace = false, anchorLaneIndex?: number, isHold = false, durationOverrideMs?: number, spaceSide?: SpaceSide, spacePath?: SpacePathPoint[]) => {
+  const toggleManualNote = (laneId: string, timeMs = editTimeMs, isSpace = false, anchorLaneIndex?: number, isHold = false, durationOverrideMs?: number, spaceSide?: SpaceSide) => {
     const laneIndex = chart.lanes.findIndex((lane) => lane.id === laneId);
     const safeLaneIndex = Math.max(0, laneIndex);
     const safeSpan = isSpace ? clampSpaceSpan(spaceSpan) : 1;
     const safeAnchorLaneIndex = isSpace ? anchorLaneIndex ?? safeLaneIndex : undefined;
-    const normalizedSpacePath = isSpace && isHold && spacePath && spacePath.length >= 2
-      ? normalizeSpacePath(spacePath, chart.meta.durationMs)
-      : undefined;
-    const pathRange = normalizedSpacePath
-      ? getSpacePathTimeRange({
-        id: "pending-space-path",
-        laneId,
-        type: "hold",
-        timeMs,
-        isSpace: true,
-        span: safeSpan,
-        anchorLaneIndex: safeAnchorLaneIndex,
-        spacePath: normalizedSpacePath,
-      })
-      : undefined;
-    const safeHoldDurationMs = isHold
-      ? clampHoldDurationMs(durationOverrideMs ?? (pathRange ? pathRange.endMs - pathRange.startMs : holdDurationMs))
-      : undefined;
+    const safeHoldDurationMs = isHold ? clampHoldDurationMs(durationOverrideMs ?? holdDurationMs) : undefined;
     const safeHoldDensity = isHold ? clampHoldDensity(holdDensity) : undefined;
-    const safeTimeMs = snapTime(pathRange?.startMs ?? timeMs, snapMs, chart.meta.durationMs);
+    const safeTimeMs = snapTime(timeMs, snapMs, chart.meta.durationMs);
     const safeSpaceSide = isSpace && !isHold ? spaceSide : undefined;
     const toleranceMs = Math.max(12, snapMs * 0.45);
     const existing = chart.notes.find((note) => {
@@ -2270,7 +2239,6 @@ function EditorView({
           durationMs: safeHoldDurationMs,
           holdDensity: safeHoldDensity,
           holdDensityPosition: isHold ? holdDensityPosition : undefined,
-          spacePath: normalizedSpacePath,
         },
       ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId));
 
@@ -2741,6 +2709,7 @@ function EditorView({
                   <button onClick={deleteSelection} disabled={!selectedNoteIds.size}>删除</button>
                   <button onClick={copySelection} disabled={!selectedNoteIds.size || !selectionRange}>复制</button>
                   <button onClick={mirrorSelection} disabled={!selectedNoteIds.size}>镜像</button>
+                  <button onClick={splitSelectedSpaceHolds} disabled={!selectedHasSpace || !selectedHasHold}>拆分物量</button>
                   <button
                     className={isMovingSelection ? "primary" : ""}
                     onClick={() => {
@@ -2981,7 +2950,7 @@ function Timeline({
   isMovingSelection: boolean;
   selectionMoveDeltaMs: number;
   selectionMoveLaneDelta: number;
-  onToggleNote: (laneId: string, timeMs: number, isSpace?: boolean, anchorLaneIndex?: number, isHold?: boolean, durationOverrideMs?: number, spaceSide?: SpaceSide, spacePath?: SpacePathPoint[]) => void;
+  onToggleNote: (laneId: string, timeMs: number, isSpace?: boolean, anchorLaneIndex?: number, isHold?: boolean, durationOverrideMs?: number, spaceSide?: SpaceSide) => void;
   onToggleLane: (timeMs: number) => void;
   onHoldDurationChange: (durationMs: number) => void;
   onSelectionChange: (ids: Set<string>, range: SelectionRange | null) => void;
@@ -2991,7 +2960,7 @@ function Timeline({
 }) {
   const duration = chart.meta.durationMs;
   const [hoverPreview, setHoverPreview] = useState<PlacementTarget | null>(null);
-  const [pendingHoldStart, setPendingHoldStart] = useState<(PlacementTarget & { isSpace: boolean; pathPoints?: SpacePathPoint[] }) | null>(null);
+  const [pendingHoldStart, setPendingHoldStart] = useState<(PlacementTarget & { isSpace: boolean }) | null>(null);
   const [selectionDraft, setSelectionDraft] = useState<SelectionRange | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
 
@@ -3073,41 +3042,6 @@ function Timeline({
       timeMs: readTimeFromPointer(event),
     };
   };
-  const makeSpacePathPoint = (placement: PlacementTarget): SpacePathPoint => ({
-    timeMs: placement.timeMs,
-    anchorLaneIndex: placement.anchorLaneIndex,
-    span: clampSpaceSpan(spaceSpan),
-  });
-  const finalizePendingSpaceHold = () => {
-    if (!pendingHoldStart?.isSpace || !pendingHoldStart.pathPoints || pendingHoldStart.pathPoints.length < 2) {
-      setPendingHoldStart(null);
-      return;
-    }
-    const pathPoints = normalizeSpacePath(pendingHoldStart.pathPoints, duration);
-    const range = getSpacePathTimeRange({
-      id: "pending-space-path",
-      laneId: pendingHoldStart.laneId,
-      type: "hold",
-      timeMs: pathPoints[0].timeMs,
-      isSpace: true,
-      span: pathPoints[0].span,
-      anchorLaneIndex: pathPoints[0].anchorLaneIndex,
-      spacePath: pathPoints,
-    });
-    const durationMs = clampHoldDurationMs(range.endMs - range.startMs);
-    onHoldDurationChange(durationMs);
-    onToggleNote(
-      pendingHoldStart.laneId,
-      range.startMs,
-      true,
-      pathPoints[0].anchorLaneIndex,
-      true,
-      durationMs,
-      undefined,
-      pathPoints,
-    );
-    setPendingHoldStart(null);
-  };
   const readLaneDeltaFromPointer = (event: React.MouseEvent<HTMLElement>) => {
     const rect = timelineRef.current?.getBoundingClientRect();
     if (!rect || !displayLanes.length) return 0;
@@ -3165,18 +3099,6 @@ function Timeline({
         }
       }}
       onMouseLeave={() => setHoverPreview(null)}
-      onContextMenu={(event) => {
-        if (pendingHoldStart?.isSpace) {
-          event.preventDefault();
-          finalizePendingSpaceHold();
-        }
-      }}
-      onDoubleClick={(event) => {
-        if (pendingHoldStart?.isSpace) {
-          event.preventDefault();
-          finalizePendingSpaceHold();
-        }
-      }}
       onClick={(event) => {
         if (placementMode === "select") {
           if (isMovingSelection) return;
@@ -3217,23 +3139,11 @@ function Timeline({
         }
 
         if (!pendingHoldStart || pendingHoldStart.isSpace !== isSpacePlacement) {
-          const pathPoint = isSpacePlacement ? makeSpacePathPoint(placement) : undefined;
           setPendingHoldStart({
             laneId: placement.laneId,
             timeMs: placement.timeMs,
             anchorLaneIndex: placement.anchorLaneIndex,
             isSpace: isSpacePlacement,
-            pathPoints: pathPoint ? [pathPoint] : undefined,
-          });
-          return;
-        }
-
-        if (isSpacePlacement) {
-          const nextPathPoints = [...(pendingHoldStart.pathPoints ?? [makeSpacePathPoint(pendingHoldStart)]), makeSpacePathPoint(placement)];
-          setPendingHoldStart({
-            ...pendingHoldStart,
-            timeMs: Math.min(pendingHoldStart.timeMs, placement.timeMs),
-            pathPoints: nextPathPoints,
           });
           return;
         }
@@ -3269,7 +3179,7 @@ function Timeline({
         <div className="judge-line editor-judge-line" style={{ top: `${judgeLinePercent}%` }} />
         {visibleNotesInEditor.map((note) => {
           const displayNote = selectedNoteIds.has(note.id) && isMovingSelection
-            ? shiftNoteLane(shiftNoteTime(note, selectionMoveDeltaMs, duration), displayLanes, laneIndexById, selectionMoveLaneDelta)
+            ? shiftNoteLane({ ...note, timeMs: note.timeMs + selectionMoveDeltaMs }, displayLanes, laneIndexById, selectionMoveLaneDelta)
             : note;
           const laneIndex = getNoteLocalLaneIndex(displayNote, displayLanes, laneIndexById);
           const timingGroup = getTimingGroupForNote(displayNote, timingGroups);
@@ -3283,24 +3193,6 @@ function Timeline({
             ...getEditorNoteStyle(displayNote, top, editTimeMs, fallMs, placement, timingGroup, judgeLinePercent),
             opacity: getTimingOpacity(timingGroup, editTimeMs) * (isGhostSpace ? 0.32 : 1),
           };
-          if (isSpaceHold(displayNote) && displayNote.spacePath?.length) {
-            return (
-              <SpacePathNoteBlock
-                key={note.id}
-                note={displayNote}
-                currentMs={editTimeMs}
-                fallMs={fallMs}
-                timingGroup={timingGroup}
-                judgeLinePercent={judgeLinePercent}
-                lanes={displayLanes}
-                selected={selectedNoteIds.has(note.id)}
-                moving={isMovingSelection && selectedNoteIds.has(note.id)}
-                judged={false}
-                dimmed={false}
-                context="editor"
-              />
-            );
-          }
           return (
             <span
               key={note.id}
@@ -3328,34 +3220,6 @@ function Timeline({
             ? getLaneEventPlacement(laneEventTargetCount, displayLanes.length)
             : getNotePlacement(previewLocalStartIndex, displayLanes.length, isSpacePreview ? spaceSpan : 1, isSpacePreview, noteSize);
           const isGhostPreview = isSpacePreview && !spaceStartHasOverlap(previewSource.anchorLaneIndex, spaceSpan, displayLanes);
-          if (isSpacePreview && isHoldPreview && pendingHoldStart?.pathPoints?.length) {
-            const hoverPoint = makeSpacePathPoint(hoverPreview);
-            const pathPoints = normalizeSpacePath([...pendingHoldStart.pathPoints, hoverPoint], duration);
-            const previewNote: Note = {
-              id: "space-path-preview",
-              laneId: pendingHoldStart.laneId,
-              type: "hold",
-              timeMs: Math.min(...pathPoints.map((point) => point.timeMs)),
-              isSpace: true,
-              span: pathPoints[0]?.span ?? spaceSpan,
-              anchorLaneIndex: pathPoints[0]?.anchorLaneIndex ?? pendingHoldStart.anchorLaneIndex,
-              durationMs: Math.max(...pathPoints.map((point) => point.timeMs)) - Math.min(...pathPoints.map((point) => point.timeMs)),
-              spacePath: pathPoints,
-            };
-            return (
-              <SpacePathNoteBlock
-                note={previewNote}
-                currentMs={editTimeMs}
-                fallMs={fallMs}
-                timingGroup={previewTimingGroup}
-                judgeLinePercent={judgeLinePercent}
-                lanes={displayLanes}
-                judged={false}
-                dimmed={false}
-                context="editor"
-              />
-            );
-          }
           return (
             <span
               className={`timeline-note placement-preview ${pendingHoldStart && isHoldPreview ? "hold-pending" : ""} ${isHoldPreview ? "hold-note" : ""} ${isSpacePreview ? "space-note" : ""} ${placementMode === "lane" ? "lane-note" : ""} ${getPlacementSpaceSideClass(placementMode)} ${isGhostPreview ? "ghost-space" : ""}`}
@@ -3500,50 +3364,6 @@ function SpaceNoteBlock({
       className={`note-block space-note ${getSpaceSideClass(note)} ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSpace ? "ghost-space" : ""}`}
       style={{ ...style, opacity }}
     />
-  );
-}
-
-function SpacePathNoteBlock({
-  note,
-  currentMs,
-  fallMs,
-  timingGroup,
-  judgeLinePercent,
-  lanes,
-  selected = false,
-  moving = false,
-  dimmed,
-  judged,
-  context,
-}: {
-  note: Note;
-  currentMs: number;
-  fallMs: number;
-  timingGroup: TimingGroup;
-  judgeLinePercent: number;
-  lanes: LaneConfig[];
-  selected?: boolean;
-  moving?: boolean;
-  dimmed: boolean;
-  judged: boolean;
-  context: "play" | "editor";
-}) {
-  const polygons = getSpacePathPolygons(note, currentMs, fallMs, timingGroup, lanes, judgeLinePercent);
-  if (!polygons.length) return null;
-  const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (dimmed ? 0.42 : 1);
-
-  return (
-    <svg
-      className={`${context === "editor" ? "timeline-space-path" : "note-space-path"} ${selected ? "selected-note" : ""} ${moving ? "moving-note" : ""}`}
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
-      style={{ opacity }}
-      aria-hidden="true"
-    >
-      {polygons.map((points, index) => (
-        <polygon key={`${note.id}-space-path-${index}`} points={points} />
-      ))}
-    </svg>
   );
 }
 
@@ -4071,114 +3891,20 @@ function getTimingOpacity(group: TimingGroup | undefined, currentMs: number) {
   return previousOpacity;
 }
 
-function isSpaceHold(note: Note) {
-  return Boolean(note.isSpace) && note.type === "hold";
-}
-
-function getSpacePathPoints(note: Note): SpacePathPoint[] {
-  const fallbackStart = {
-    timeMs: Math.max(0, Math.round(note.timeMs)),
-    anchorLaneIndex: getNoteAnchorIndex(note),
-    span: clampSpaceSpan(note.span ?? 1),
-  };
-  if (!isSpaceHold(note)) return [fallbackStart];
-
-  const rawPoints = Array.isArray(note.spacePath) ? note.spacePath : [];
-  const points = rawPoints
-    .filter((point) => point && Number.isFinite(point.timeMs) && Number.isFinite(point.anchorLaneIndex))
-    .map((point) => ({
-      timeMs: Math.max(0, Math.round(point.timeMs)),
-      anchorLaneIndex: point.anchorLaneIndex,
-      span: clampSpaceSpan(point.span ?? note.span ?? 1),
-    }));
-
-  if (points.length >= 2) return points;
-
-  return [
-    fallbackStart,
-    {
-      ...fallbackStart,
-      timeMs: fallbackStart.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS),
-    },
-  ];
-}
-
-function getSpacePathTimeRange(note: Note) {
-  const points = getSpacePathPoints(note);
-  const times = points.map((point) => point.timeMs);
-  return {
-    startMs: Math.min(...times),
-    endMs: Math.max(...times),
-  };
-}
-
-function getSpacePathPointAtTime(note: Note, timeMs: number) {
-  const points = getSpacePathPoints(note);
-  if (!points.length) {
-    return {
-      timeMs: note.timeMs,
-      anchorLaneIndex: getNoteAnchorIndex(note),
-      span: clampSpaceSpan(note.span ?? 1),
-    };
-  }
-
-  let nearest = points[0];
-  let nearestDistance = Math.abs(timeMs - nearest.timeMs);
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const start = points[index];
-    const end = points[index + 1];
-    const segmentDuration = end.timeMs - start.timeMs;
-    if (segmentDuration === 0) {
-      const distance = Math.abs(timeMs - start.timeMs);
-      if (distance < nearestDistance) {
-        nearest = start;
-        nearestDistance = distance;
-      }
-      continue;
-    }
-
-    const minTime = Math.min(start.timeMs, end.timeMs);
-    const maxTime = Math.max(start.timeMs, end.timeMs);
-    if (timeMs < minTime || timeMs > maxTime) {
-      const distance = Math.min(Math.abs(timeMs - start.timeMs), Math.abs(timeMs - end.timeMs));
-      if (distance < nearestDistance) {
-        nearest = distance === Math.abs(timeMs - start.timeMs) ? start : end;
-        nearestDistance = distance;
-      }
-      continue;
-    }
-
-    const ratio = (timeMs - start.timeMs) / segmentDuration;
-    return {
-      timeMs,
-      anchorLaneIndex: start.anchorLaneIndex + (end.anchorLaneIndex - start.anchorLaneIndex) * ratio,
-      span: clampSpaceSpan(start.span + (end.span - start.span) * ratio),
-    };
-  }
-
-  return nearest;
-}
-
 function getNoteEndTimeMs(note: Note) {
-  if (isSpaceHold(note)) return getSpacePathTimeRange(note).endMs;
   return note.type === "hold" ? note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS) : note.timeMs;
 }
 
 function getHoldDensityTimes(note: Note) {
   const density = clampHoldDensity(note.holdDensity ?? DEFAULT_HOLD_DENSITY);
-  const pathRange = isSpaceHold(note) ? getSpacePathTimeRange(note) : undefined;
-  const durationMs = pathRange
-    ? Math.max(0, pathRange.endMs - pathRange.startMs)
-    : clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS);
-  const startMs = pathRange?.startMs ?? note.timeMs;
-  if (durationMs <= 0) return [];
+  const durationMs = clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS);
   if (density <= 1) {
     const position = note.holdDensityPosition ?? DEFAULT_HOLD_DENSITY_POSITION;
     const ratio = position === "head" ? 0 : position === "tail" ? 1 : 0.5;
-    return [Math.round(startMs + durationMs * ratio)];
+    return [Math.round(note.timeMs + durationMs * ratio)];
   }
   return Array.from({ length: density }, (_, index) => (
-    Math.round(startMs + (durationMs * (index + 1)) / (density + 1))
+    Math.round(note.timeMs + (durationMs * (index + 1)) / (density + 1))
   ));
 }
 
@@ -4319,19 +4045,6 @@ function noteContainsLane(note: Note, rawLaneIndex: number, laneCount: number, l
   if (!note.isSpace) {
     return rawLaneIndex === laneIndexById.get(note.laneId);
   }
-  if (isSpaceHold(note)) {
-    const laneStart = getLanePhysicalStartIndex(lanes);
-    const points = getSpacePathPoints(note);
-    return points.slice(0, -1).some((point, index) => {
-      const nextPoint = points[index + 1];
-      const startLeft = point.anchorLaneIndex - laneStart;
-      const startRight = startLeft + clampSpaceSpan(point.span);
-      const endLeft = nextPoint.anchorLaneIndex - laneStart;
-      const endRight = endLeft + clampSpaceSpan(nextPoint.span);
-      return rawLaneIndex >= Math.min(startLeft, endLeft)
-        && rawLaneIndex < Math.max(startRight, endRight);
-    });
-  }
   const span = clampSpaceSpan(note.span ?? 1);
   const startIndex = getSpaceLocalStartIndex(note, lanes, laneIndexById);
   return rawLaneIndex >= startIndex && rawLaneIndex < startIndex + span;
@@ -4360,13 +4073,6 @@ function mirrorNote(note: Note, lanes: LaneConfig[]): Note {
     ...note,
     laneId: lanes[Math.min(safeLaneCount - 1, Math.max(0, mirroredStartIndex))]?.id ?? note.laneId,
     anchorLaneIndex: mirroredAnchorIndex,
-    spacePath: note.spacePath?.map((point) => {
-      const localPointStart = point.anchorLaneIndex - getLanePhysicalStartIndex(lanes);
-      return {
-        ...point,
-        anchorLaneIndex: getLanePhysicalStartIndex(lanes) + safeLaneCount - localPointStart - clampSpaceSpan(point.span),
-      };
-    }),
     spaceSide: note.type !== "hold" ? mirrorSpaceSide(note.spaceSide) : note.spaceSide,
   };
 }
@@ -4388,10 +4094,6 @@ function shiftNoteLane(note: Note, lanes: LaneConfig[], laneIndexById: Map<strin
       ...note,
       laneId: lanes[fallbackLaneIndex]?.id ?? note.laneId,
       anchorLaneIndex: nextAnchorLaneIndex,
-      spacePath: note.spacePath?.map((point) => ({
-        ...point,
-        anchorLaneIndex: point.anchorLaneIndex + laneDelta,
-      })),
     };
   }
 
@@ -4408,10 +4110,9 @@ function getHoldInputCodes(
   note: Note,
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
-  tickTimeMs?: number,
 ) {
   if (note.isSpace) {
-    return getSpaceProjection(note, activeLanes, sourceLaneIndexById, tickTimeMs).isJudgeable ? ["Space"] : [];
+    return getSpaceProjection(note, activeLanes, sourceLaneIndexById).isJudgeable ? ["Space"] : [];
   }
   const lane = activeLanes.find((item) => item.id === note.laneId);
   return lane?.keyCodes ?? [];
@@ -4422,30 +4123,20 @@ function getTouchHoldInputState(
   touchInputs: TouchHoldInputSnapshot | undefined,
   tickTimeMs: number,
   currentMs: number,
-  activeLanes: LaneConfig[],
-  sourceLaneIndexById: Map<string, number>,
 ): HoldInputState {
   if (!touchInputs) return { isHeld: false, isEligible: false };
 
   if (note.isSpace) {
     const activeTouches = [...touchInputs.activeTouches.values()];
-    const projection = getSpaceProjection(note, activeLanes, sourceLaneIndexById, tickTimeMs);
-    const matchingTouches = projection.isJudgeable
-      ? activeTouches.filter((touch) => (
-        typeof touch.laneIndex === "number"
-        && touch.laneIndex >= projection.judgeStartIndex
-        && touch.laneIndex < projection.judgeStartIndex + projection.judgeSpan
-      ))
-      : [];
-    const activePressMs = matchingTouches.length
-      ? Math.min(...matchingTouches.map((touch) => touch.startedAtMs))
+    const activePressMs = activeTouches.length
+      ? Math.min(...activeTouches.map((touch) => touch.startedAtMs))
       : undefined;
     const isGraceHeld = !activeTouches.length
       && typeof touchInputs.lastTouchReleaseMs === "number"
       && currentMs >= touchInputs.lastTouchReleaseMs
       && currentMs - touchInputs.lastTouchReleaseMs <= touchInputs.spaceGraceMs;
     const pressMs = activePressMs ?? (isGraceHeld ? touchInputs.lastTouchReleaseMs ?? undefined : undefined);
-    const isHeld = matchingTouches.length > 0 || isGraceHeld;
+    const isHeld = activeTouches.length > 0 || isGraceHeld;
     if (!isHeld) return { isHeld: false, isEligible: false };
 
     return {
@@ -4492,8 +4183,8 @@ function getHoldInputState(
   currentMs: number,
   touchInputs?: TouchHoldInputSnapshot,
 ): HoldInputState {
-  const touchState = getTouchHoldInputState(note, touchInputs, tickTimeMs, currentMs, activeLanes, sourceLaneIndexById);
-  const codes = getHoldInputCodes(note, activeLanes, sourceLaneIndexById, tickTimeMs);
+  const touchState = getTouchHoldInputState(note, touchInputs, tickTimeMs, currentMs);
+  const codes = getHoldInputCodes(note, activeLanes, sourceLaneIndexById);
   const code = codes.find((item) => pressedCodes.has(item));
   if (!code) return touchState;
 
@@ -4735,16 +4426,10 @@ function getSpaceProjection(
   note: Note,
   lanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
-  timeMs?: number,
 ): SpaceProjection {
   const laneCount = lanes.length;
-  const pathPoint = isSpaceHold(note) && typeof timeMs === "number"
-    ? getSpacePathPointAtTime(note, timeMs)
-    : undefined;
-  const sourceAnchorIndex = pathPoint
-    ? pathPoint.anchorLaneIndex - getLanePhysicalStartIndex(lanes)
-    : getSpaceLocalStartIndex(note, lanes, sourceLaneIndexById);
-  const sourceSpan = clampSpaceSpan(pathPoint?.span ?? note.span ?? 1);
+  const sourceAnchorIndex = getSpaceLocalStartIndex(note, lanes, sourceLaneIndexById);
+  const sourceSpan = clampSpaceSpan(note.span ?? 1);
   const sourceStartIndex = sourceAnchorIndex;
   const visualStartIndex = sourceStartIndex;
   const visualEndIndex = sourceStartIndex + sourceSpan;
@@ -4769,54 +4454,6 @@ function getSpaceProjection(
     judgeSpan: sourceOverlapEnd - sourceOverlapStart,
     isJudgeable: true,
   };
-}
-
-function getSpaceNoteAtTime(note: Note, timeMs: number): Note {
-  if (!isSpaceHold(note)) return note;
-  const point = getSpacePathPointAtTime(note, timeMs);
-  return {
-    ...note,
-    timeMs,
-    anchorLaneIndex: point.anchorLaneIndex,
-    span: point.span,
-  };
-}
-
-function getSpacePathPolygons(
-  note: Note,
-  currentMs: number,
-  fallMs: number,
-  timingGroup: TimingGroup,
-  lanes: LaneConfig[],
-  judgeLinePercent: number,
-) {
-  if (!isSpaceHold(note) || lanes.length <= 0) return [];
-  const laneStart = getLanePhysicalStartIndex(lanes);
-  const laneCount = lanes.length;
-  const points = getSpacePathPoints(note);
-  const toCanvasPoint = (point: SpacePathPoint) => {
-    const localStart = point.anchorLaneIndex - laneStart;
-    const span = clampSpaceSpan(point.span);
-    return {
-      left: (localStart / laneCount) * 100,
-      right: ((localStart + span) / laneCount) * 100,
-      top: getNoteTopPercent(point.timeMs, currentMs, fallMs, timingGroup, judgeLinePercent),
-    };
-  };
-
-  return points.slice(0, -1).map((point, index) => {
-    const start = toCanvasPoint(point);
-    const end = toCanvasPoint(points[index + 1]);
-    const horizontalPadding = start.top === end.top ? 0.45 : 0;
-    const startTop = Math.max(-12, Math.min(112, start.top - horizontalPadding));
-    const endTop = Math.max(-12, Math.min(112, end.top + horizontalPadding));
-    return [
-      `${roundCssNumber(start.left)},${roundCssNumber(startTop)}`,
-      `${roundCssNumber(start.right)},${roundCssNumber(startTop)}`,
-      `${roundCssNumber(end.right)},${roundCssNumber(endTop)}`,
-      `${roundCssNumber(end.left)},${roundCssNumber(endTop)}`,
-    ].join(" ");
-  });
 }
 
 function getBurstProjection(
@@ -4961,7 +4598,7 @@ function isNoteJudgeableAtTime(
   const activeLanesAtTime = getActiveLaneSlice(chart.lanes, getLaneCountAtTime(chart, timeMs));
   if (!isNoteVisibleOnLanes(note, activeLanesAtTime)) return false;
   if (note.isSpace) {
-    return getSpaceProjection(note, activeLanesAtTime, sourceLaneIndexById, timeMs).isJudgeable;
+    return getSpaceProjection(note, activeLanesAtTime, sourceLaneIndexById).isJudgeable;
   }
   return activeLanesAtTime.some((lane) => lane.id === note.laneId);
 }
@@ -5006,8 +4643,8 @@ function showJudgeBursts(
   }, 520);
 }
 
-function getSpannedLaneIds(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, timeMs?: number) {
-  const projection = getSpaceProjection(note, lanes, laneIndexById, timeMs);
+function getSpannedLaneIds(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>) {
+  const projection = getSpaceProjection(note, lanes, laneIndexById);
   if (!projection.isJudgeable) return [];
   return lanes
     .slice(projection.judgeStartIndex, projection.judgeStartIndex + projection.judgeSpan)
@@ -5048,33 +4685,6 @@ function snapTime(timeMs: number, snapMs: number, durationMs: number) {
   return Math.max(0, Math.min(durationMs, Math.round(snapped)));
 }
 
-function normalizeSpacePath(points: SpacePathPoint[], durationMs: number): SpacePathPoint[] {
-  return points
-    .filter((point) => point && Number.isFinite(point.timeMs) && Number.isFinite(point.anchorLaneIndex))
-    .map((point) => ({
-      timeMs: Math.max(0, Math.min(durationMs, Math.round(point.timeMs))),
-      anchorLaneIndex: point.anchorLaneIndex,
-      span: clampSpaceSpan(point.span),
-    }));
-}
-
-function shiftNoteTime(note: Note, deltaMs: number, durationMs: number, snapMs?: number): Note {
-  const shiftTime = (timeMs: number) => {
-    const shifted = timeMs + deltaMs;
-    return snapMs === undefined
-      ? Math.max(0, Math.min(durationMs, Math.round(shifted)))
-      : snapTime(shifted, snapMs, durationMs);
-  };
-  return {
-    ...note,
-    timeMs: shiftTime(note.timeMs),
-    spacePath: note.spacePath?.map((point) => ({
-      ...point,
-      timeMs: shiftTime(point.timeMs),
-    })),
-  };
-}
-
 function formatTime(timeMs: number) {
   const totalSeconds = Math.max(0, Math.floor(timeMs / 1000));
   const minutes = Math.floor(totalSeconds / 60);
@@ -5101,8 +4711,8 @@ interface ChartKeySoundEvent {
   isSpace: boolean;
 }
 
-function playHitKeySound(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, volume: number, timeMs?: number) {
-  const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById, timeMs);
+function playHitKeySound(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, volume: number) {
+  const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById);
   if (laneIndex === undefined) return;
   playKeySound(laneIndex, Boolean(note.isSpace), volume);
 }
@@ -5113,9 +4723,8 @@ function playHitKeySoundOnce(
   laneIndexById: Map<string, number>,
   volume: number,
   playedKeys: Set<string>,
-  timeMs?: number,
 ) {
-  const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById, timeMs);
+  const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById);
   if (laneIndex === undefined) return;
   const key = `${laneIndex}:${Boolean(note.isSpace)}`;
   if (playedKeys.has(key)) return;
@@ -5166,12 +4775,12 @@ function getChartKeySoundEvents(
     if (isLaneNote(note)) return [];
     if (note.type === "hold" && (getNoteEndTimeMs(note) < startMs || note.timeMs > endMs)) return [];
     if (note.type !== "hold" && (note.timeMs < startMs || note.timeMs > endMs)) return [];
+    const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById);
+    if (laneIndex === undefined) return [];
     if (note.type === "hold") {
       const events: ChartKeySoundEvent[] = [];
       getHoldDensityTimes(note).forEach((timeMs, tickIndex) => {
         if (timeMs < startMs || timeMs > endMs) return;
-        const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById, timeMs);
-        if (laneIndex === undefined) return;
         events.push({
           id: getHoldTickId(note, tickIndex),
           timeMs,
@@ -5181,8 +4790,6 @@ function getChartKeySoundEvents(
       });
       return events;
     }
-    const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById);
-    if (laneIndex === undefined) return [];
     return [{
       id: `${note.id}:tap`,
       timeMs: note.timeMs,
@@ -5192,9 +4799,9 @@ function getChartKeySoundEvents(
   });
 }
 
-function getKeySoundLaneIndex(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, timeMs?: number) {
+function getKeySoundLaneIndex(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>) {
   if (note.isSpace) {
-    const projection = getSpaceProjection(note, lanes, laneIndexById, timeMs);
+    const projection = getSpaceProjection(note, lanes, laneIndexById);
     if (!projection.isJudgeable) return undefined;
     return Math.min(
       lanes.length - 1,
