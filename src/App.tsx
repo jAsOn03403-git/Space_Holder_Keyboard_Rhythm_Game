@@ -3590,7 +3590,7 @@ function SpaceNoteBlock({
               key={`${note.id}-segment-${index}`}
               className={`note-block space-note hold-note ${getSpaceHoldHandClass(segment.hand)} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSegment ? "ghost-space" : ""}`}
               style={{
-                ...getSpaceHoldSegmentStyle(segment, currentMs, fallMs, laneCount, lanePhysicalStartIndex, timingGroup, judgeLinePercent, laneFieldAspectRatio),
+                ...getSpaceHoldSegmentStyle(segment, currentMs, fallMs, laneCount, lanePhysicalStartIndex, timingGroup, judgeLinePercent, laneFieldAspectRatio, caught),
                 opacity: segmentOpacity,
               }}
             />
@@ -4209,9 +4209,16 @@ function getSpaceHoldSegmentStyle(
   timingGroup?: TimingGroup,
   judgeLinePercent = JUDGE_LINE_PERCENT,
   canvasAspectRatio = 1,
+  clampPastJudgeLine = false,
 ): CSSProperties {
-  const startTop = getNoteTopPercent(segment.startTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
-  const endTop = getNoteTopPercent(segment.endTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const rawStartTop = getNoteTopPercent(segment.startTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const rawEndTop = getNoteTopPercent(segment.endTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const startTop = clampPastJudgeLine && currentMs >= segment.startTimeMs
+    ? Math.min(rawStartTop, judgeLinePercent)
+    : rawStartTop;
+  const endTop = clampPastJudgeLine && currentMs >= segment.endTimeMs
+    ? Math.min(rawEndTop, judgeLinePercent)
+    : rawEndTop;
   const startLeft = segment.startLaneIndex - lanePhysicalStartIndex;
   const endLeft = segment.endLaneIndex - lanePhysicalStartIndex;
   const safeLaneCount = Math.max(1, laneCount);
