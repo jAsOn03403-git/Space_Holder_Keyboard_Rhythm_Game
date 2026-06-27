@@ -42,6 +42,7 @@ const DEFAULT_HOLD_DENSITY = 4;
 const DEFAULT_HOLD_DENSITY_POSITION: HoldDensityPosition = "middle";
 const SPACE_LANE_GRID = 0.25;
 const MIN_SPACE_SPAN = 0.25;
+const MIN_SPACE_HOLD_TOUCH_JUDGE_SPAN = 0.5;
 const DEFAULT_SPACE_HOLD_HAND: SpaceHoldHand = "neutral";
 const LEFT_SPACE_INPUT_CODES = new Set([
   "KeyQ",
@@ -4500,7 +4501,8 @@ function getTouchHoldInputState(
     const bridgeTouches = bridge
       ? activeTouches.filter((touch) => isTouchInsideSpaceRegion(touch, bridge.startIndex, bridge.span))
       : [];
-    const regionTouches = activeTouches.filter((touch) => isTouchInsideSpaceRegion(touch, region.startIndex, region.span));
+    const touchJudgeRegion = getSpaceHoldTouchJudgeRegion(region.startIndex, region.span);
+    const regionTouches = activeTouches.filter((touch) => isTouchInsideSpaceRegion(touch, touchJudgeRegion.startIndex, touchJudgeRegion.span));
     const hand = region.hand;
     const wrongSide: SpaceSide | undefined = hand === "left" ? "right" : hand === "right" ? "left" : undefined;
     const requiredSide: SpaceSide | undefined = hand === "left" ? "left" : hand === "right" ? "right" : undefined;
@@ -4704,6 +4706,15 @@ function isTouchInsideSpaceRegion(touch: TouchInputState, startIndex: number, sp
   if (typeof touch.spaceLanePosition !== "number") return false;
   const endIndex = startIndex + span;
   return touch.spaceLanePosition >= startIndex && touch.spaceLanePosition <= endIndex;
+}
+
+function getSpaceHoldTouchJudgeRegion(startIndex: number, span: number) {
+  const judgeSpan = Math.max(span, MIN_SPACE_HOLD_TOUCH_JUDGE_SPAN);
+  const center = startIndex + span / 2;
+  return {
+    startIndex: center - judgeSpan / 2,
+    span: judgeSpan,
+  };
 }
 
 function getPointerEventChartMs(eventTimeStamp: number, liveChartMs: number) {
