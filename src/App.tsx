@@ -1,6 +1,6 @@
 ﻿import { ChangeEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlayStats, SpaceSide, TimingEvent, TimingEventType, TimingGroup } from "./types";
+import type { CSSProperties, PointerEvent as ReactPointerEvent, RefObject } from "react";
+import type { Chart, HoldDensityPosition, JudgeResult, LaneConfig, Note, PlayStats, SpaceHoldHand, SpaceHoldSegment, SpaceSide, TimingEvent, TimingEventType, TimingGroup } from "./types";
 import { DEFAULT_TIMING_GROUP_ID, assignDefaultTimingGroup, createDefaultTimingGroups, createManualChart, createStarterChart, getJudgeResult, normalizeTimingGroups, rebuildChartGrid, sanitizeBpm } from "./lib/charting";
 import { clampLaneCount, findLaneForKey, getKeyboardSegments, getPlayableCodeIndex, shouldIgnoreKey } from "./lib/keyboard";
 
@@ -40,6 +40,9 @@ const FIXED_WIDTH_LANES = 7;
 const DEFAULT_HOLD_DURATION_MS = 1000;
 const DEFAULT_HOLD_DENSITY = 4;
 const DEFAULT_HOLD_DENSITY_POSITION: HoldDensityPosition = "middle";
+const SPACE_LANE_GRID = 0.25;
+const MIN_SPACE_SPAN = 0.25;
+const DEFAULT_SPACE_HOLD_HAND: SpaceHoldHand = "neutral";
 const LEFT_SPACE_INPUT_CODES = new Set([
   "KeyQ",
   "KeyW",
@@ -105,6 +108,8 @@ interface TouchInputState {
   laneId?: string;
   laneIndex?: number;
   lanePressMs?: number;
+  side?: SpaceSide;
+  spaceLanePosition?: number;
   startedAtMs: number;
 }
 
@@ -127,6 +132,7 @@ interface TouchHoldInputSnapshot {
 interface HoldInputState {
   isHeld: boolean;
   isEligible: boolean;
+  isBlocked?: boolean;
   code?: string;
   pressMs?: number;
 }
@@ -244,6 +250,31 @@ function useStoredBoolean(key: string, fallback: boolean) {
   }, [key, value]);
 
   return [value, setValue] as const;
+}
+
+function useElementAspectRatio(ref: RefObject<HTMLElement | null>, refreshKey: unknown) {
+  const [aspectRatio, setAspectRatio] = useState(1);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return undefined;
+    const updateAspectRatio = () => {
+      const rect = element.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setAspectRatio(rect.height / rect.width);
+      }
+    };
+    updateAspectRatio();
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(updateAspectRatio);
+    observer?.observe(element);
+    window.addEventListener("resize", updateAspectRatio);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateAspectRatio);
+    };
+  }, [ref, refreshKey]);
+
+  return aspectRatio;
 }
 
 function getPageFromPath(pathname: string): Page {
@@ -447,6 +478,7 @@ function PlayView({
     () => getActiveLaneSlice(chart.lanes, currentLaneCount),
     [chart.lanes, currentLaneCount],
   );
+  const laneFieldAspectRatio = useElementAspectRatio(laneFieldRef, activeLanes.length);
   const timingGroups = useMemo(() => getTimingGroups(chart), [chart]);
   const judgeLinePercent = calibrationActive ? JUDGE_LINE_PERCENT : getJudgeLinePercent(timingGroups, chartMs);
   const keyboardSegments = useMemo(() => getKeyboardSegments(activeLanes), [activeLanes]);
@@ -585,6 +617,7 @@ function PlayView({
 
   const updateTouchLaneState = useCallback((touch: TouchInputState, x: number, y: number, liveChartMs: number): TouchInputState => {
     const target = getTouchLaneTarget(x, y);
+    const spaceLanePosition = getTouchSpaceLanePositionFromPoint(x, y, laneFieldRef.current, activeLanes);
     if (!target) {
       return {
         ...touch,
@@ -593,6 +626,7 @@ function PlayView({
         laneId: undefined,
         laneIndex: undefined,
         lanePressMs: undefined,
+        spaceLanePosition,
       };
     }
 
@@ -604,8 +638,9 @@ function PlayView({
       laneId: target.lane.id,
       laneIndex: target.index,
       lanePressMs: laneChanged ? liveChartMs : touch.lanePressMs ?? liveChartMs,
+      spaceLanePosition,
     };
-  }, [getTouchLaneTarget]);
+  }, [activeLanes, getTouchLaneTarget]);
 
   const getTouchHoldSnapshot = useCallback((): TouchHoldInputSnapshot => ({
     activeTouches: activeTouchesRef.current,
@@ -947,13 +982,8 @@ function PlayView({
       if (note.type !== "hold" || judgedIds.has(note.id)) return;
       if (!note.isSpace && failedHoldIdsRef.current.has(note.id)) return;
       if (!note.isSpace && !autoplay && !startedHoldIdsRef.current.has(note.id)) return;
-      if (note.isSpace && !getSpaceProjection(note, activeLanes, chartLaneIndexById).isJudgeable) {
-        if (chartMs >= getNoteEndTimeMs(note)) {
-          setJudgedIds((previous) => new Set(previous).add(note.id));
-        }
-        return;
-      }
       getHoldDensityTimes(note).forEach((timeMs, tickIndex) => {
+        if (note.isSpace && !getSpaceProjectionAtTime(note, timeMs, activeLanes, chartLaneIndexById).isJudgeable) return;
         const tickId = getHoldTickId(note, tickIndex);
         if (!judgedHoldTickIds.has(tickId) && chartMs >= timeMs) {
           dueTicks.push({ note, tickId, timeMs });
@@ -973,6 +1003,7 @@ function PlayView({
           activeLanes,
           chartLaneIndexById,
           keyPressTimesRef.current,
+          chart.notes,
           timeMs,
           chartMs,
           getTouchHoldSnapshot(),
@@ -991,7 +1022,10 @@ function PlayView({
     const completedHoldIds = new Set<string>();
     judgementWindowNotes.forEach((note) => {
       if (note.type !== "hold" || judgedIds.has(note.id) || chartMs < getNoteEndTimeMs(note)) return;
-      if (getHoldDensityTimes(note).every((_, tickIndex) => nextTickIds.has(getHoldTickId(note, tickIndex)))) {
+      if (getHoldDensityTimes(note).every((timeMs, tickIndex) => (
+        nextTickIds.has(getHoldTickId(note, tickIndex))
+        || (note.isSpace && !getSpaceProjectionAtTime(note, timeMs, activeLanes, chartLaneIndexById).isJudgeable)
+      ))) {
         completedHoldIds.add(note.id);
       }
     });
@@ -1010,7 +1044,7 @@ function PlayView({
         return next;
       });
     }
-  }, [activeLanes, autoplay, calibrationActive, chart.lanes.length, chartLaneIndexById, chartMs, getTouchHoldSnapshot, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, scoreUnit]);
+  }, [activeLanes, autoplay, calibrationActive, chart.lanes.length, chart.notes, chartLaneIndexById, chartMs, getTouchHoldSnapshot, isPlaying, judgedHoldTickIds, judgedIds, judgementWindowNotes, keyVolume, scoreUnit]);
 
   const processTouchStartBatch = useCallback(() => {
     touchBatchTimerRef.current = null;
@@ -1180,6 +1214,7 @@ function PlayView({
         pointerId: event.pointerId,
         x: event.clientX,
         y: event.clientY,
+        side: getTouchSpaceSide(event.clientX),
         startedAtMs: inputChartMs,
       },
       event.clientX,
@@ -1201,7 +1236,7 @@ function PlayView({
       inputChartMs,
       laneId: touch.laneId,
       laneIndex: touch.laneIndex,
-      side: getTouchSpaceSide(event.clientX),
+      side: touch.side,
     });
     updateTouchFeedback();
     scheduleTouchStartBatch();
@@ -1534,7 +1569,7 @@ function PlayView({
                 judgeLinePercent={judgeLinePercent}
                 judged={displayJudgedIds.has(note.id)}
                 caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
-                dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
+                dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, chart.notes, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
               />
             ))
           ))}
@@ -1547,10 +1582,12 @@ function PlayView({
               timingGroup={getTimingGroupForNote(note, timingGroups)}
               judgeLinePercent={judgeLinePercent}
               laneCount={activeLanes.length}
-              projection={getSpaceProjection(note, activeLanes, chartLaneIndexById)}
+              lanePhysicalStartIndex={getLanePhysicalStartIndex(activeLanes)}
+              laneFieldAspectRatio={laneFieldAspectRatio}
+              projection={getSpaceProjectionAtTime(note, chartMs, activeLanes, chartLaneIndexById)}
               judged={judgedIds.has(note.id)}
               caught={isHoldVisuallyCaught(note, startedHoldIds, judgedHoldTickIds)}
-              dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
+              dimmed={isHoldDimmed(note, chartMs, pressedCodesRef.current, activeLanes, chartLaneIndexById, keyPressTimesRef.current, chart.notes, startedHoldIds, failedHoldIds, getTouchHoldSnapshot())}
             />
           ))}
           {visibleLaneEventNotes.map((note) => (
@@ -1646,6 +1683,7 @@ function EditorView({
   const [analysisLabel, setAnalysisLabel] = useState("等待导入音乐，或直接在竖向制谱器上手工落音");
   const [editTimeMs, setEditTimeMs] = useState(0);
   const [spaceSpan, setSpaceSpan] = useState(2);
+  const [spaceHoldHand, setSpaceHoldHand] = useState<SpaceHoldHand>(DEFAULT_SPACE_HOLD_HAND);
   const [placementMode, setPlacementMode] = useState<PlacementMode>("select");
   const [holdDurationMs, setHoldDurationMs] = useState(DEFAULT_HOLD_DURATION_MS);
   const [holdDensityPosition, setHoldDensityPosition] = useState<HoldDensityPosition>(DEFAULT_HOLD_DENSITY_POSITION);
@@ -1947,6 +1985,7 @@ function EditorView({
   const displayedSelectionStartMs = Math.round(selectionMovePreviewMs ?? selectionHeadTimeMs ?? editTimeMs);
   const selectedHasSpace = selectedNotes.some((note) => note.isSpace);
   const selectedHasHold = selectedNotes.some((note) => note.type === "hold");
+  const selectedHasSpaceHold = selectedNotes.some((note) => note.isSpace && note.type === "hold");
   const selectedHasLane = selectedNotes.some((note) => isLaneNote(note));
 
   useEffect(() => {
@@ -1973,6 +2012,9 @@ function EditorView({
       onHoldDensityChange(clampHoldDensity(firstHold.holdDensity ?? holdDensity));
       setHoldDurationMs(clampHoldDurationMs(firstHold.durationMs ?? holdDurationMs));
       setHoldDensityPosition(firstHold.holdDensityPosition ?? DEFAULT_HOLD_DENSITY_POSITION);
+      if (firstHold.isSpace) {
+        setSpaceHoldHand(getSpaceHoldSegments(firstHold)[0]?.hand ?? DEFAULT_SPACE_HOLD_HAND);
+      }
     }
     const firstLane = selectedNotes.find((note) => isLaneNote(note));
     if (firstLane) {
@@ -1991,7 +2033,30 @@ function EditorView({
   const updateSelectedSpaceSpan = (nextSpan: number) => {
     const safeSpan = clampSpaceSpan(nextSpan);
     setSpaceSpan(safeSpan);
-    updateSelectedNotes((note) => note.isSpace ? { ...note, span: safeSpan } : note);
+    updateSelectedNotes((note) => note.isSpace ? {
+      ...note,
+      span: safeSpan,
+      spaceHoldSegments: note.spaceHoldSegments?.map((segment) => ({ ...segment, width: safeSpan })),
+    } : note);
+  };
+
+  const updateSelectedSpaceHoldHand = (nextHand: SpaceHoldHand) => {
+    const safeHand = normalizeSpaceHoldHand(nextHand);
+    setSpaceHoldHand(safeHand);
+    updateSelectedNotes((note) => note.isSpace && note.type === "hold"
+      ? {
+        ...note,
+        spaceHoldSegments: getSpaceHoldSegments(note).map((segment) => ({
+          startTimeMs: segment.startTimeMs,
+          endTimeMs: segment.endTimeMs,
+          startLaneIndex: segment.startLaneIndex,
+          endLaneIndex: segment.endLaneIndex,
+          width: segment.width,
+          hand: safeHand,
+          isConnector: segment.isConnector,
+        })),
+      }
+      : note);
   };
 
   const updateSelectedHoldDensity = (nextDensity: number) => {
@@ -2135,18 +2200,37 @@ function EditorView({
     const splitTargets = selectedNotes.filter((note) => note.isSpace && note.type === "hold");
     if (!splitTargets.length) return;
     const splitTargetIds = new Set(splitTargets.map((note) => note.id));
+    const laneIndexById = new Map(chart.lanes.map((lane, index) => [lane.id, index]));
     const created: Note[] = [];
     splitTargets.forEach((note) => {
       const densityTimes = getHoldDensityTimes(note);
       const segmentDurationMs = clampHoldDurationMs(Math.min(Math.max(1, snapMs), Math.max(1, (note.durationMs ?? DEFAULT_HOLD_DURATION_MS) / (densityTimes.length + 1))));
       densityTimes.forEach((timeMs, index) => {
+        const startTimeMs = snapTime(timeMs - segmentDurationMs / 2, snapMs, chart.meta.durationMs);
+        const endTimeMs = Math.min(chart.meta.durationMs, startTimeMs + segmentDurationMs);
+        const startRegion = getSpaceRegionAtTime(note, startTimeMs, chart.lanes, laneIndexById);
+        const endRegion = getSpaceRegionAtTime(note, endTimeMs, chart.lanes, laneIndexById) ?? startRegion;
+        const lanePhysicalStartIndex = getLanePhysicalStartIndex(chart.lanes);
+        const startLaneIndex = snapSpaceLaneValue((startRegion?.startIndex ?? getSpaceLocalStartIndex(note, chart.lanes, laneIndexById)) + lanePhysicalStartIndex);
+        const endLaneIndex = snapSpaceLaneValue((endRegion?.startIndex ?? startRegion?.startIndex ?? getSpaceLocalStartIndex(note, chart.lanes, laneIndexById)) + lanePhysicalStartIndex);
+        const width = clampSpaceSpan(startRegion?.span ?? note.span ?? 1);
         created.push({
           ...note,
           id: `split-${Date.now()}-${note.id}-${index}`,
-          timeMs: snapTime(timeMs - segmentDurationMs / 2, snapMs, chart.meta.durationMs),
+          timeMs: startTimeMs,
           durationMs: segmentDurationMs,
           holdDensity: 1,
           holdDensityPosition: "middle",
+          span: width,
+          anchorLaneIndex: startLaneIndex,
+          spaceHoldSegments: [{
+            startTimeMs,
+            endTimeMs,
+            startLaneIndex,
+            endLaneIndex,
+            width,
+            hand: startRegion?.hand ?? DEFAULT_SPACE_HOLD_HAND,
+          }],
         });
       });
     });
@@ -2199,13 +2283,24 @@ function EditorView({
     moveSelectionTo(nextStartMs);
   };
 
-  const toggleManualNote = (laneId: string, timeMs = editTimeMs, isSpace = false, anchorLaneIndex?: number, isHold = false, durationOverrideMs?: number, spaceSide?: SpaceSide) => {
+  const toggleManualNote = (
+    laneId: string,
+    timeMs = editTimeMs,
+    isSpace = false,
+    anchorLaneIndex?: number,
+    isHold = false,
+    durationOverrideMs?: number,
+    spaceSide?: SpaceSide,
+    endAnchorLaneIndex?: number,
+    holdHand: SpaceHoldHand = spaceHoldHand,
+    isConnector = false,
+  ) => {
     const laneIndex = chart.lanes.findIndex((lane) => lane.id === laneId);
     const safeLaneIndex = Math.max(0, laneIndex);
     const safeSpan = isSpace ? clampSpaceSpan(spaceSpan) : 1;
     const safeAnchorLaneIndex = isSpace ? anchorLaneIndex ?? safeLaneIndex : undefined;
     const safeHoldDurationMs = isHold ? clampHoldDurationMs(durationOverrideMs ?? holdDurationMs) : undefined;
-    const safeHoldDensity = isHold ? clampHoldDensity(holdDensity) : undefined;
+    const safeHoldDensity = isHold && !isConnector ? clampHoldDensity(holdDensity) : undefined;
     const safeTimeMs = snapTime(timeMs, snapMs, chart.meta.durationMs);
     const safeSpaceSide = isSpace && !isHold ? spaceSide : undefined;
     const toleranceMs = Math.max(12, snapMs * 0.45);
@@ -2239,6 +2334,17 @@ function EditorView({
           durationMs: safeHoldDurationMs,
           holdDensity: safeHoldDensity,
           holdDensityPosition: isHold ? holdDensityPosition : undefined,
+          spaceHoldSegments: isSpace && isHold && safeHoldDurationMs
+            ? [{
+              startTimeMs: safeTimeMs,
+              endTimeMs: isConnector ? safeTimeMs : safeTimeMs + safeHoldDurationMs,
+              startLaneIndex: snapSpaceLaneValue(safeAnchorLaneIndex ?? safeLaneIndex),
+              endLaneIndex: snapSpaceLaneValue(endAnchorLaneIndex ?? safeAnchorLaneIndex ?? safeLaneIndex),
+              width: safeSpan,
+              hand: normalizeSpaceHoldHand(holdHand),
+              isConnector,
+            }]
+            : undefined,
         },
       ].sort((a, b) => a.timeMs - b.timeMs || a.laneId.localeCompare(b.laneId));
 
@@ -2649,11 +2755,22 @@ function EditorView({
                   <span>跨度</span>
                   <input
                     type="number"
-                    min={1}
+                    min={MIN_SPACE_SPAN}
                     max={10}
+                    step={SPACE_LANE_GRID}
                     value={spaceSpan}
                     onChange={(event) => setSpaceSpan(clampSpaceSpan(Number(event.target.value)))}
                   />
+                </label>
+              ) : null}
+              {placementMode === "space-hold" ? (
+                <label className="control-field">
+                  <span>段头</span>
+                  <select value={spaceHoldHand} onChange={(event) => setSpaceHoldHand(normalizeSpaceHoldHand(event.target.value))}>
+                    <option value="neutral">无 L/R</option>
+                    <option value="left">L</option>
+                    <option value="right">R</option>
+                  </select>
                 </label>
               ) : null}
               {isHoldPlacementMode(placementMode) ? (
@@ -2745,11 +2862,22 @@ function EditorView({
                     <span>Space 跨度</span>
                     <input
                       type="number"
-                      min={1}
+                      min={MIN_SPACE_SPAN}
                       max={10}
+                      step={SPACE_LANE_GRID}
                       value={spaceSpan}
                       onChange={(event) => updateSelectedSpaceSpan(Number(event.target.value))}
                     />
+                  </label>
+                ) : null}
+                {selectedHasSpaceHold ? (
+                  <label className="control-field">
+                    <span>Space Hold 段头</span>
+                    <select value={spaceHoldHand} onChange={(event) => updateSelectedSpaceHoldHand(normalizeSpaceHoldHand(event.target.value))}>
+                      <option value="neutral">无 L/R</option>
+                      <option value="left">L</option>
+                      <option value="right">R</option>
+                    </select>
                   </label>
                 ) : null}
                 {selectedHasLane ? (
@@ -2875,6 +3003,7 @@ function EditorView({
             placementMode={placementMode}
             spaceSpan={spaceSpan}
             holdDurationMs={holdDurationMs}
+            spaceHoldHand={spaceHoldHand}
             activeTimingGroupId={activeTimingGroupId}
             laneEventTargetCount={laneEventTargetCount}
             selectedNoteIds={selectedNoteIds}
@@ -2916,6 +3045,7 @@ function Timeline({
   placementMode,
   spaceSpan,
   holdDurationMs,
+  spaceHoldHand,
   activeTimingGroupId,
   laneEventTargetCount,
   selectedNoteIds,
@@ -2942,6 +3072,7 @@ function Timeline({
   placementMode: PlacementMode;
   spaceSpan: number;
   holdDurationMs: number;
+  spaceHoldHand: SpaceHoldHand;
   activeTimingGroupId: string;
   laneEventTargetCount: number;
   selectedNoteIds: Set<string>;
@@ -2950,7 +3081,7 @@ function Timeline({
   isMovingSelection: boolean;
   selectionMoveDeltaMs: number;
   selectionMoveLaneDelta: number;
-  onToggleNote: (laneId: string, timeMs: number, isSpace?: boolean, anchorLaneIndex?: number, isHold?: boolean, durationOverrideMs?: number, spaceSide?: SpaceSide) => void;
+  onToggleNote: (laneId: string, timeMs: number, isSpace?: boolean, anchorLaneIndex?: number, isHold?: boolean, durationOverrideMs?: number, spaceSide?: SpaceSide, endAnchorLaneIndex?: number, holdHand?: SpaceHoldHand, isConnector?: boolean) => void;
   onToggleLane: (timeMs: number) => void;
   onHoldDurationChange: (durationMs: number) => void;
   onSelectionChange: (ids: Set<string>, range: SelectionRange | null) => void;
@@ -2973,6 +3104,7 @@ function Timeline({
     () => previewLaneCount === undefined ? chart.lanes : getActiveLaneSlice(chart.lanes, previewLaneCount),
     [chart.lanes, previewLaneCount],
   );
+  const timelineAspectRatio = useElementAspectRatio(timelineRef, displayLanes.length);
   const laneIndexById = useMemo(
     () => new Map(displayLanes.map((lane, index) => [lane.id, index])),
     [displayLanes],
@@ -3017,20 +3149,21 @@ function Timeline({
     const rect = timelineRef.current?.getBoundingClientRect();
     if (!rect || !displayLanes.length) return null;
     const cellWidth = rect.width / displayLanes.length;
-    const rawLaneIndex = Math.floor((event.clientX - rect.left) / cellWidth);
+    const rawLanePosition = (event.clientX - rect.left) / cellWidth;
+    const rawLaneIndex = Math.floor(rawLanePosition);
     const isSpacePlacement = isSpacePlacementMode(placementMode);
     const lanePhysicalStart = getLanePhysicalStartIndex(displayLanes);
-    const rawPhysicalIndex = lanePhysicalStart + rawLaneIndex;
+    const rawPhysicalIndex = lanePhysicalStart + rawLanePosition;
     const pointerIsLeftOfCenter = event.clientX < rect.left + rect.width / 2;
     const centerBandWidth = Math.max(cellWidth * 0.9, rect.width * 0.08);
     const pointerIsInCenterBand = Math.abs(event.clientX - (rect.left + rect.width / 2)) <= centerBandWidth / 2;
     const safeSpaceSpan = clampSpaceSpan(spaceSpan);
     const anchorLaneIndex = isSpacePlacement
       ? pointerIsInCenterBand
-        ? lanePhysicalStart + Math.floor((displayLanes.length - safeSpaceSpan) / 2)
+        ? snapSpaceLaneValue(lanePhysicalStart + (displayLanes.length - safeSpaceSpan) / 2)
         : pointerIsLeftOfCenter
-          ? rawPhysicalIndex - safeSpaceSpan + 1
-          : rawPhysicalIndex
+          ? snapSpaceLaneValue(rawPhysicalIndex - safeSpaceSpan)
+          : snapSpaceLaneValue(rawPhysicalIndex)
       : getLanePhysicalIndex(displayLanes[Math.min(displayLanes.length - 1, Math.max(0, rawLaneIndex))]);
     if (!isSpacePlacement && (rawLaneIndex < 0 || rawLaneIndex >= displayLanes.length)) {
       return null;
@@ -3151,8 +3284,22 @@ function Timeline({
         const startTimeMs = Math.min(pendingHoldStart.timeMs, placement.timeMs);
         const endTimeMs = Math.max(pendingHoldStart.timeMs, placement.timeMs);
         const durationMs = clampHoldDurationMs(endTimeMs - startTimeMs);
-        onHoldDurationChange(durationMs);
-        onToggleNote(pendingHoldStart.laneId, startTimeMs, pendingHoldStart.isSpace, pendingHoldStart.anchorLaneIndex, true, durationMs);
+        const startAnchorLaneIndex = pendingHoldStart.timeMs <= placement.timeMs
+          ? pendingHoldStart.anchorLaneIndex
+          : placement.anchorLaneIndex;
+        const endAnchorLaneIndex = pendingHoldStart.timeMs <= placement.timeMs
+          ? placement.anchorLaneIndex
+          : pendingHoldStart.anchorLaneIndex;
+        const startLaneId = pendingHoldStart.timeMs <= placement.timeMs
+          ? pendingHoldStart.laneId
+          : placement.laneId;
+        const isSpaceConnector = pendingHoldStart.isSpace
+          && pendingHoldStart.timeMs === placement.timeMs
+          && snapSpaceLaneValue(startAnchorLaneIndex) !== snapSpaceLaneValue(endAnchorLaneIndex);
+        if (!isSpaceConnector) {
+          onHoldDurationChange(durationMs);
+        }
+        onToggleNote(startLaneId, startTimeMs, pendingHoldStart.isSpace, startAnchorLaneIndex, true, durationMs, undefined, endAnchorLaneIndex, pendingHoldStart.isSpace ? spaceHoldHand : undefined, isSpaceConnector);
         setPendingHoldStart(null);
       }}
     >
@@ -3193,6 +3340,38 @@ function Timeline({
             ...getEditorNoteStyle(displayNote, top, editTimeMs, fallMs, placement, timingGroup, judgeLinePercent),
             opacity: getTimingOpacity(timingGroup, editTimeMs) * (isGhostSpace ? 0.32 : 1),
           };
+          if (displayNote.isSpace && displayNote.type === "hold") {
+            const lanePhysicalStartIndex = getLanePhysicalStartIndex(displayLanes);
+            return (
+              <Fragment key={note.id}>
+                {getSpaceHoldSegments(displayNote).map((segment, index) => {
+                  const segmentProjection = getSpaceProjectionFromRegion({
+                    startIndex: segment.startLaneIndex - lanePhysicalStartIndex,
+                    span: segment.width,
+                    hand: segment.hand,
+                    segment,
+                  }, displayLanes.length);
+                  const endProjection = getSpaceProjectionFromRegion({
+                    startIndex: segment.endLaneIndex - lanePhysicalStartIndex,
+                    span: segment.width,
+                    hand: segment.hand,
+                    segment,
+                  }, displayLanes.length);
+                  const isGhostSegment = !segmentProjection.isJudgeable && !endProjection.isJudgeable;
+                  return (
+                    <span
+                      key={`${note.id}-segment-${index}`}
+                      className={`timeline-note ${selectedNoteIds.has(note.id) ? "selected-note" : ""} ${isMovingSelection && selectedNoteIds.has(note.id) ? "moving-note" : ""} hold-note space-note ${getSpaceHoldHandClass(segment.hand)} ${isGhostSegment ? "ghost-space" : ""}`}
+                      style={{
+                        ...getSpaceHoldSegmentStyle(segment, editTimeMs, fallMs, displayLanes.length, lanePhysicalStartIndex, timingGroup, judgeLinePercent, timelineAspectRatio),
+                        opacity: getTimingOpacity(timingGroup, editTimeMs) * (isGhostSegment ? 0.32 : 1),
+                      }}
+                    />
+                  );
+                })}
+              </Fragment>
+            );
+          }
           return (
             <span
               key={note.id}
@@ -3220,6 +3399,39 @@ function Timeline({
             ? getLaneEventPlacement(laneEventTargetCount, displayLanes.length)
             : getNotePlacement(previewLocalStartIndex, displayLanes.length, isSpacePreview ? spaceSpan : 1, isSpacePreview, noteSize);
           const isGhostPreview = isSpacePreview && !spaceStartHasOverlap(previewSource.anchorLaneIndex, spaceSpan, displayLanes);
+          if (isSpacePreview && isHoldPreview) {
+            const matchingPendingHoldStart = pendingHoldStart?.isSpace === isSpacePreview ? pendingHoldStart : undefined;
+            const isConnectorPreview = Boolean(matchingPendingHoldStart)
+              && matchingPendingHoldStart?.timeMs === hoverPreview.timeMs
+              && snapSpaceLaneValue(matchingPendingHoldStart.anchorLaneIndex) !== snapSpaceLaneValue(hoverPreview.anchorLaneIndex);
+            const startAnchorLaneIndex = matchingPendingHoldStart && matchingPendingHoldStart.timeMs > hoverPreview.timeMs
+              ? hoverPreview.anchorLaneIndex
+              : previewSource.anchorLaneIndex;
+            const endAnchorLaneIndex = matchingPendingHoldStart
+              ? matchingPendingHoldStart.timeMs > hoverPreview.timeMs
+                ? matchingPendingHoldStart.anchorLaneIndex
+                : hoverPreview.anchorLaneIndex
+              : previewSource.anchorLaneIndex;
+            const previewSegment = normalizeSpaceHoldSegment({
+              startTimeMs: previewStartTimeMs,
+              endTimeMs: previewStartTimeMs + previewDurationMs,
+              startLaneIndex: startAnchorLaneIndex,
+              endLaneIndex: endAnchorLaneIndex,
+              width: spaceSpan,
+              hand: spaceHoldHand,
+              isConnector: isConnectorPreview,
+            }, previewStartTimeMs, previewStartTimeMs + previewDurationMs, startAnchorLaneIndex, spaceSpan);
+            const lanePhysicalStartIndex = getLanePhysicalStartIndex(displayLanes);
+            return (
+              <span
+                className={`timeline-note placement-preview hold-note space-note ${pendingHoldStart && isHoldPreview ? "hold-pending" : ""} ${getSpaceHoldHandClass(spaceHoldHand)} ${isGhostPreview ? "ghost-space" : ""}`}
+                style={{
+                  ...getSpaceHoldSegmentStyle(previewSegment, editTimeMs, fallMs, displayLanes.length, lanePhysicalStartIndex, previewTimingGroup, judgeLinePercent, timelineAspectRatio),
+                  opacity: getTimingOpacity(previewTimingGroup, editTimeMs) * (isGhostPreview ? 0.32 : 1),
+                }}
+              />
+            );
+          }
           return (
             <span
               className={`timeline-note placement-preview ${pendingHoldStart && isHoldPreview ? "hold-pending" : ""} ${isHoldPreview ? "hold-note" : ""} ${isSpacePreview ? "space-note" : ""} ${placementMode === "lane" ? "lane-note" : ""} ${getPlacementSpaceSideClass(placementMode)} ${isGhostPreview ? "ghost-space" : ""}`}
@@ -3331,6 +3543,8 @@ function SpaceNoteBlock({
   timingGroup,
   judgeLinePercent,
   laneCount,
+  lanePhysicalStartIndex,
+  laneFieldAspectRatio,
   projection,
   judged,
   caught,
@@ -3342,6 +3556,8 @@ function SpaceNoteBlock({
   timingGroup: TimingGroup;
   judgeLinePercent: number;
   laneCount: number;
+  lanePhysicalStartIndex: number;
+  laneFieldAspectRatio: number;
   projection: SpaceProjection;
   judged: boolean;
   caught: boolean;
@@ -3351,18 +3567,47 @@ function SpaceNoteBlock({
   const placement = getSpacePlacementFromStartIndex(projection.startIndex, laneCount, projection.span);
   const isGhostSpace = !projection.isJudgeable;
   const opacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (isGhostSpace ? 0.32 : dimmed ? 0.42 : 1);
-  const style = note.type === "hold"
-    ? getPlayHoldStyle(note, top, currentMs, fallMs, placement, timingGroup, caught, judgeLinePercent)
-    : {
-      top: `${top}%`,
-      left: `${placement.left}%`,
-      width: `${placement.width}%`,
-    };
-
+  if (note.type === "hold") {
+    return (
+      <>
+        {getSpaceHoldSegments(note).map((segment, index) => {
+          const segmentProjection = getSpaceProjectionFromRegion({
+            startIndex: segment.startLaneIndex - lanePhysicalStartIndex,
+            span: segment.width,
+            hand: segment.hand,
+            segment,
+          }, laneCount);
+          const endProjection = getSpaceProjectionFromRegion({
+            startIndex: segment.endLaneIndex - lanePhysicalStartIndex,
+            span: segment.width,
+            hand: segment.hand,
+            segment,
+          }, laneCount);
+          const isGhostSegment = !segmentProjection.isJudgeable && !endProjection.isJudgeable;
+          const segmentOpacity = judged ? 0 : getTimingOpacity(timingGroup, currentMs) * (isGhostSegment ? 0.32 : dimmed ? 0.42 : 1);
+          return (
+            <span
+              key={`${note.id}-segment-${index}`}
+              className={`note-block space-note hold-note ${getSpaceHoldHandClass(segment.hand)} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSegment ? "ghost-space" : ""}`}
+              style={{
+                ...getSpaceHoldSegmentStyle(segment, currentMs, fallMs, laneCount, lanePhysicalStartIndex, timingGroup, judgeLinePercent, laneFieldAspectRatio),
+                opacity: segmentOpacity,
+              }}
+            />
+          );
+        })}
+      </>
+    );
+  }
   return (
     <span
-      className={`note-block space-note ${getSpaceSideClass(note)} ${note.type === "hold" ? "hold-note" : ""} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSpace ? "ghost-space" : ""}`}
-      style={{ ...style, opacity }}
+      className={`note-block space-note ${getSpaceSideClass(note)} ${dimmed ? "hold-dimmed" : ""} ${judged ? "judged" : ""} ${isGhostSpace ? "ghost-space" : ""}`}
+      style={{
+        top: `${top}%`,
+        left: `${placement.left}%`,
+        width: `${placement.width}%`,
+        opacity,
+      }}
     />
   );
 }
@@ -3892,12 +4137,21 @@ function getTimingOpacity(group: TimingGroup | undefined, currentMs: number) {
 }
 
 function getNoteEndTimeMs(note: Note) {
-  return note.type === "hold" ? note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS) : note.timeMs;
+  if (note.type !== "hold") return note.timeMs;
+  const segmentEndMs = getSpaceHoldSegments(note).reduce((latest, segment) => Math.max(latest, segment.endTimeMs), note.timeMs);
+  return Math.max(note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS), segmentEndMs);
 }
 
 function getHoldDensityTimes(note: Note) {
+  const spaceHoldSegments = getSpaceHoldSegments(note);
+  if (isSpaceHoldConnectorNote(note, spaceHoldSegments)) {
+    return [];
+  }
   const density = clampHoldDensity(note.holdDensity ?? DEFAULT_HOLD_DENSITY);
-  const durationMs = clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS);
+  const segmentEndMs = spaceHoldSegments.reduce((latest, segment) => Math.max(latest, segment.endTimeMs), note.timeMs);
+  const durationMs = note.isSpace
+    ? clampHoldDurationMs(Math.max(note.durationMs ?? DEFAULT_HOLD_DURATION_MS, segmentEndMs - note.timeMs))
+    : clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS);
   if (density <= 1) {
     const position = note.holdDensityPosition ?? DEFAULT_HOLD_DENSITY_POSITION;
     const ratio = position === "head" ? 0 : position === "tail" ? 1 : 0.5;
@@ -3939,6 +4193,67 @@ function getPlayHoldStyle(
     width: `${placement.width}%`,
     height: `${Math.max(1.1, Math.abs(rawTailTop - clampedHeadTop))}%`,
     transform: "none",
+  };
+}
+
+function isSpaceHoldConnectorNote(note: Note, segments = getSpaceHoldSegments(note)) {
+  return Boolean(note.isSpace && note.type === "hold" && segments.length && segments.every((segment) => segment.isConnector));
+}
+
+function getSpaceHoldSegmentStyle(
+  segment: ResolvedSpaceHoldSegment,
+  currentMs: number,
+  fallMs: number,
+  laneCount: number,
+  lanePhysicalStartIndex: number,
+  timingGroup?: TimingGroup,
+  judgeLinePercent = JUDGE_LINE_PERCENT,
+  canvasAspectRatio = 1,
+): CSSProperties {
+  const startTop = getNoteTopPercent(segment.startTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const endTop = getNoteTopPercent(segment.endTimeMs, currentMs, fallMs, timingGroup, judgeLinePercent);
+  const startLeft = segment.startLaneIndex - lanePhysicalStartIndex;
+  const endLeft = segment.endLaneIndex - lanePhysicalStartIndex;
+  const safeLaneCount = Math.max(1, laneCount);
+  const startCenterX = ((startLeft + segment.width / 2) / safeLaneCount) * 100;
+  const endCenterX = ((endLeft + segment.width / 2) / safeLaneCount) * 100;
+  const halfWidthPercent = ((segment.width / safeLaneCount) * 100) / 2;
+  if (segment.isConnector) {
+    const left = Math.min(startCenterX, endCenterX) - halfWidthPercent;
+    const right = Math.max(startCenterX, endCenterX) + halfWidthPercent;
+    const heightPercent = Math.max(1.1, (halfWidthPercent * 2) / Math.max(0.001, canvasAspectRatio));
+    return {
+      top: `${startTop - heightPercent / 2}%`,
+      left: `${left}%`,
+      width: `${Math.max((MIN_SPACE_SPAN / safeLaneCount) * 100, right - left)}%`,
+      height: `${heightPercent}%`,
+      transform: "none",
+      clipPath: "polygon(0% 0%, 100% 0%, 100% 100%, 0% 100%)",
+    };
+  }
+  const points = [
+    { x: startCenterX - halfWidthPercent, y: startTop },
+    { x: startCenterX + halfWidthPercent, y: startTop },
+    { x: endCenterX + halfWidthPercent, y: endTop },
+    { x: endCenterX - halfWidthPercent, y: endTop },
+  ];
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxY = Math.max(...points.map((point) => point.y));
+  const widthPercent = Math.max((MIN_SPACE_SPAN / safeLaneCount) * 100, maxX - minX);
+  const heightPercent = Math.max(1.1, maxY - minY);
+  const polygon = points.map((point) => [
+    ((point.x - minX) / widthPercent) * 100,
+    ((point.y - minY) / heightPercent) * 100,
+  ]);
+  return {
+    top: `${minY}%`,
+    left: `${minX}%`,
+    width: `${widthPercent}%`,
+    height: `${heightPercent}%`,
+    transform: "none",
+    clipPath: `polygon(${polygon.map(([x, y]) => `${roundCssNumber(x)}% ${roundCssNumber(y)}%`).join(", ")})`,
   };
 }
 
@@ -4045,6 +4360,15 @@ function noteContainsLane(note: Note, rawLaneIndex: number, laneCount: number, l
   if (!note.isSpace) {
     return rawLaneIndex === laneIndexById.get(note.laneId);
   }
+  const segments = getSpaceHoldSegments(note);
+  if (segments.length) {
+    const lanePhysicalStartIndex = getLanePhysicalStartIndex(lanes);
+    return segments.some((segment) => {
+      const localStart = Math.min(segment.startLaneIndex, segment.endLaneIndex) - lanePhysicalStartIndex;
+      const localEnd = Math.max(segment.startLaneIndex, segment.endLaneIndex) - lanePhysicalStartIndex + segment.width;
+      return rawLaneIndex >= localStart && rawLaneIndex < localEnd;
+    });
+  }
   const span = clampSpaceSpan(note.span ?? 1);
   const startIndex = getSpaceLocalStartIndex(note, lanes, laneIndexById);
   return rawLaneIndex >= startIndex && rawLaneIndex < startIndex + span;
@@ -4074,6 +4398,7 @@ function mirrorNote(note: Note, lanes: LaneConfig[]): Note {
     laneId: lanes[Math.min(safeLaneCount - 1, Math.max(0, mirroredStartIndex))]?.id ?? note.laneId,
     anchorLaneIndex: mirroredAnchorIndex,
     spaceSide: note.type !== "hold" ? mirrorSpaceSide(note.spaceSide) : note.spaceSide,
+    spaceHoldSegments: note.spaceHoldSegments?.map((segment) => mirrorSpaceHoldSegment(segment, lanes)),
   };
 }
 
@@ -4081,6 +4406,29 @@ function mirrorSpaceSide(side?: SpaceSide): SpaceSide | undefined {
   if (side === "left") return "right";
   if (side === "right") return "left";
   return side;
+}
+
+function mirrorSpaceHoldHand(hand?: SpaceHoldHand): SpaceHoldHand | undefined {
+  if (hand === "left") return "right";
+  if (hand === "right") return "left";
+  return hand;
+}
+
+function mirrorSpaceHoldSegment(segment: SpaceHoldSegment, lanes: LaneConfig[]): SpaceHoldSegment {
+  const lanePhysicalStart = getLanePhysicalStartIndex(lanes);
+  const safeLaneCount = Math.max(1, lanes.length);
+  const width = clampSpaceSpan(segment.width);
+  const mirrorIndex = (physicalIndex: number) => {
+    const localIndex = physicalIndex - lanePhysicalStart;
+    return snapSpaceLaneValue(lanePhysicalStart + safeLaneCount - localIndex - width);
+  };
+  return {
+    ...segment,
+    startLaneIndex: mirrorIndex(segment.startLaneIndex),
+    endLaneIndex: mirrorIndex(segment.endLaneIndex),
+    width,
+    hand: mirrorSpaceHoldHand(segment.hand),
+  };
 }
 
 function shiftNoteLane(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, laneDelta: number): Note {
@@ -4094,6 +4442,11 @@ function shiftNoteLane(note: Note, lanes: LaneConfig[], laneIndexById: Map<strin
       ...note,
       laneId: lanes[fallbackLaneIndex]?.id ?? note.laneId,
       anchorLaneIndex: nextAnchorLaneIndex,
+      spaceHoldSegments: note.spaceHoldSegments?.map((segment) => ({
+        ...segment,
+        startLaneIndex: snapSpaceLaneValue(segment.startLaneIndex + laneDelta),
+        endLaneIndex: snapSpaceLaneValue(segment.endLaneIndex + laneDelta),
+      })),
     };
   }
 
@@ -4110,9 +4463,10 @@ function getHoldInputCodes(
   note: Note,
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
+  tickTimeMs = note.timeMs,
 ) {
   if (note.isSpace) {
-    return getSpaceProjection(note, activeLanes, sourceLaneIndexById).isJudgeable ? ["Space"] : [];
+    return getSpaceProjectionAtTime(note, tickTimeMs, activeLanes, sourceLaneIndexById).isJudgeable ? ["Space"] : [];
   }
   const lane = activeLanes.find((item) => item.id === note.laneId);
   return lane?.keyCodes ?? [];
@@ -4121,22 +4475,47 @@ function getHoldInputCodes(
 function getTouchHoldInputState(
   note: Note,
   touchInputs: TouchHoldInputSnapshot | undefined,
+  activeLanes: LaneConfig[],
+  sourceLaneIndexById: Map<string, number>,
+  allNotes: Note[],
   tickTimeMs: number,
   currentMs: number,
 ): HoldInputState {
   if (!touchInputs) return { isHeld: false, isEligible: false };
 
   if (note.isSpace) {
+    const region = getSpaceRegionAtTime(note, tickTimeMs, activeLanes, sourceLaneIndexById);
+    const projection = getSpaceProjectionFromRegion(region, activeLanes.length);
+    if (!region || !projection.isJudgeable) return { isHeld: false, isEligible: false };
+
+    const bridge = getSpaceHoldBridgeRegion(note, allNotes, tickTimeMs, activeLanes, sourceLaneIndexById);
     const activeTouches = [...touchInputs.activeTouches.values()];
-    const activePressMs = activeTouches.length
-      ? Math.min(...activeTouches.map((touch) => touch.startedAtMs))
+    const bridgeTouches = bridge
+      ? activeTouches.filter((touch) => isTouchInsideSpaceRegion(touch, bridge.startIndex, bridge.span))
+      : [];
+    const regionTouches = activeTouches.filter((touch) => isTouchInsideSpaceRegion(touch, region.startIndex, region.span));
+    const hand = region.hand;
+    const wrongSide: SpaceSide | undefined = hand === "left" ? "right" : hand === "right" ? "left" : undefined;
+    const requiredSide: SpaceSide | undefined = hand === "left" ? "left" : hand === "right" ? "right" : undefined;
+    const hasWrongTouch = Boolean(wrongSide) && regionTouches.some((touch) => touch.side === wrongSide);
+    const validTouches = bridgeTouches.length
+      ? bridgeTouches
+      : requiredSide
+        ? regionTouches.filter((touch) => touch.side === requiredSide)
+        : regionTouches;
+    const activePressMs = validTouches.length
+      ? Math.min(...validTouches.map((touch) => touch.startedAtMs))
       : undefined;
-    const isGraceHeld = !activeTouches.length
+    const canUseGrace = !hasWrongTouch && !requiredSide && !validTouches.length && !activeTouches.length;
+    const isGraceHeld = canUseGrace
       && typeof touchInputs.lastTouchReleaseMs === "number"
       && currentMs >= touchInputs.lastTouchReleaseMs
       && currentMs - touchInputs.lastTouchReleaseMs <= touchInputs.spaceGraceMs;
     const pressMs = activePressMs ?? (isGraceHeld ? touchInputs.lastTouchReleaseMs ?? undefined : undefined);
-    const isHeld = activeTouches.length > 0 || isGraceHeld;
+    const isHeld = validTouches.length > 0 || isGraceHeld || hasWrongTouch;
+    if (hasWrongTouch && !bridgeTouches.length) {
+      return { pressMs, isHeld: true, isEligible: false, isBlocked: true };
+    }
     if (!isHeld) return { isHeld: false, isEligible: false };
 
     return {
@@ -4179,26 +4558,22 @@ function getHoldInputState(
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
   keyPressTimes: Map<string, number>,
+  allNotes: Note[],
   tickTimeMs: number,
   currentMs: number,
   touchInputs?: TouchHoldInputSnapshot,
 ): HoldInputState {
-  const touchState = getTouchHoldInputState(note, touchInputs, tickTimeMs, currentMs);
-  const codes = getHoldInputCodes(note, activeLanes, sourceLaneIndexById);
+  const touchState = getTouchHoldInputState(note, touchInputs, activeLanes, sourceLaneIndexById, allNotes, tickTimeMs, currentMs);
+  const codes = getHoldInputCodes(note, activeLanes, sourceLaneIndexById, tickTimeMs);
   const code = codes.find((item) => pressedCodes.has(item));
-  if (!code) return touchState;
 
-  const pressMs = keyPressTimes.get(code);
   if (note.isSpace) {
-    const keyboardState: HoldInputState = {
-      code,
-      pressMs,
-      isHeld: true,
-      isEligible: typeof pressMs === "number"
-        && (currentMs <= tickTimeMs + HIT_WINDOW_MS || pressMs <= tickTimeMs + HIT_WINDOW_MS),
-    };
+    const keyboardState = getKeyboardSpaceHoldInputState(note, pressedCodes, keyPressTimes, activeLanes, sourceLaneIndexById, allNotes, tickTimeMs, currentMs);
     return keyboardState.isEligible || !touchState.isEligible ? keyboardState : touchState;
   }
+
+  if (!code) return touchState;
+  const pressMs = keyPressTimes.get(code);
   if (currentMs > tickTimeMs + HIT_WINDOW_MS) {
     const keyboardState: HoldInputState = {
       code,
@@ -4225,6 +4600,7 @@ function isHoldDimmed(
   activeLanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
   keyPressTimes: Map<string, number>,
+  allNotes: Note[],
   startedHoldIds: Set<string>,
   failedHoldIds: Set<string>,
   touchInputs?: TouchHoldInputSnapshot,
@@ -4236,7 +4612,7 @@ function isHoldDimmed(
   }
   const nextTickTime = getHoldDensityTimes(note).find((timeMs) => timeMs >= currentMs - HIT_WINDOW_MS);
   if (nextTickTime === undefined) return false;
-  const input = getHoldInputState(note, pressedCodes, activeLanes, sourceLaneIndexById, keyPressTimes, nextTickTime, currentMs, touchInputs);
+  const input = getHoldInputState(note, pressedCodes, activeLanes, sourceLaneIndexById, keyPressTimes, allNotes, nextTickTime, currentMs, touchInputs);
   return currentMs >= note.timeMs
     && currentMs <= getNoteEndTimeMs(note)
     && !input.isEligible;
@@ -4256,6 +4632,55 @@ function getPlacementSpaceSide(mode: PlacementMode): SpaceSide | undefined {
   return undefined;
 }
 
+function getKeyboardSpaceHoldInputState(
+  note: Note,
+  pressedCodes: Set<string>,
+  keyPressTimes: Map<string, number>,
+  activeLanes: LaneConfig[],
+  sourceLaneIndexById: Map<string, number>,
+  allNotes: Note[],
+  tickTimeMs: number,
+  currentMs: number,
+): HoldInputState {
+  const region = getSpaceRegionAtTime(note, tickTimeMs, activeLanes, sourceLaneIndexById);
+  const projection = getSpaceProjectionFromRegion(region, activeLanes.length);
+  if (!region || !projection.isJudgeable) return { isHeld: false, isEligible: false };
+  const bridge = getSpaceHoldBridgeRegion(note, allNotes, tickTimeMs, activeLanes, sourceLaneIndexById);
+  const hand = bridge ? DEFAULT_SPACE_HOLD_HAND : region.hand;
+  const leftCodes = [...pressedCodes].filter((code) => getSpaceInputSideForCode(code) === "left");
+  const rightCodes = [...pressedCodes].filter((code) => getSpaceInputSideForCode(code) === "right");
+  const hasSpace = pressedCodes.has("Space");
+  const hasLeft = leftCodes.length > 0;
+  const hasRight = rightCodes.length > 0;
+  const isBlocked = hand === "left" ? hasRight : hand === "right" ? hasLeft : false;
+  const candidateCodes = hand === "left"
+    ? leftCodes
+    : hand === "right"
+      ? rightCodes
+      : [...leftCodes, ...rightCodes, ...(hasSpace ? ["Space"] : [])];
+  const firstCode = candidateCodes
+    .map((code) => ({ code, pressMs: keyPressTimes.get(code) }))
+    .filter((item) => typeof item.pressMs === "number")
+    .sort((a, b) => (a.pressMs ?? 0) - (b.pressMs ?? 0))[0];
+
+  if (isBlocked) {
+    return {
+      code: firstCode?.code,
+      pressMs: firstCode?.pressMs,
+      isHeld: true,
+      isEligible: false,
+      isBlocked: true,
+    };
+  }
+  if (!firstCode) return { isHeld: false, isEligible: false };
+  return {
+    code: firstCode.code,
+    pressMs: firstCode.pressMs,
+    isHeld: true,
+    isEligible: currentMs <= tickTimeMs + HIT_WINDOW_MS || (firstCode.pressMs ?? Infinity) <= tickTimeMs + HIT_WINDOW_MS,
+  };
+}
+
 function getSpaceInputSideForCode(code: string): SpaceSide | undefined {
   if (LEFT_SPACE_INPUT_CODES.has(code)) return "left";
   if (RIGHT_SPACE_INPUT_CODES.has(code)) return "right";
@@ -4266,6 +4691,12 @@ function getTouchSpaceSide(x: number): SpaceSide | undefined {
   if (x < window.innerWidth * TOUCH_LEFT_ZONE_RATIO) return "left";
   if (x > window.innerWidth * TOUCH_RIGHT_ZONE_RATIO) return "right";
   return undefined;
+}
+
+function isTouchInsideSpaceRegion(touch: TouchInputState, startIndex: number, span: number) {
+  if (typeof touch.spaceLanePosition !== "number") return false;
+  const endIndex = startIndex + span;
+  return touch.spaceLanePosition >= startIndex && touch.spaceLanePosition <= endIndex;
 }
 
 function getPointerEventChartMs(eventTimeStamp: number, liveChartMs: number) {
@@ -4298,6 +4729,20 @@ function getTouchLaneTargetFromPoint(
   return lane ? { lane, index: laneIndex } : undefined;
 }
 
+function getTouchSpaceLanePositionFromPoint(
+  x: number,
+  y: number,
+  laneField: HTMLDivElement | null,
+  activeLanes: LaneConfig[],
+) {
+  if (!laneField || !activeLanes.length) return undefined;
+  const fieldRect = laneField.getBoundingClientRect();
+  if (x < fieldRect.left || x > fieldRect.right || y < fieldRect.top || y > fieldRect.bottom) {
+    return undefined;
+  }
+  return ((x - fieldRect.left) / Math.max(1, fieldRect.width)) * activeLanes.length;
+}
+
 function getTouchLaneIds(touches: Map<number, TouchInputState>) {
   const laneIds = new Set<string>();
   touches.forEach((touch) => {
@@ -4328,6 +4773,12 @@ function getSpaceSideClass(note: Note) {
   if (!note.isSpace || note.type === "hold") return "";
   if (note.spaceSide === "left") return "space-left-note";
   if (note.spaceSide === "right") return "space-right-note";
+  return "";
+}
+
+function getSpaceHoldHandClass(hand?: SpaceHoldHand) {
+  if (hand === "left") return "space-left-note";
+  if (hand === "right") return "space-right-note";
   return "";
 }
 
@@ -4422,15 +4873,58 @@ interface SpaceProjection {
   isJudgeable: boolean;
 }
 
+interface ResolvedSpaceHoldSegment {
+  startTimeMs: number;
+  endTimeMs: number;
+  startLaneIndex: number;
+  endLaneIndex: number;
+  width: number;
+  hand: SpaceHoldHand;
+  isConnector: boolean;
+}
+
+interface SpaceHoldRegion {
+  startIndex: number;
+  span: number;
+  hand: SpaceHoldHand;
+  segment: ResolvedSpaceHoldSegment;
+}
+
 function getSpaceProjection(
   note: Note,
   lanes: LaneConfig[],
   sourceLaneIndexById: Map<string, number>,
 ): SpaceProjection {
-  const laneCount = lanes.length;
-  const sourceAnchorIndex = getSpaceLocalStartIndex(note, lanes, sourceLaneIndexById);
-  const sourceSpan = clampSpaceSpan(note.span ?? 1);
-  const sourceStartIndex = sourceAnchorIndex;
+  return getSpaceProjectionFromRegion(
+    getSpaceRegionAtTime(note, note.timeMs, lanes, sourceLaneIndexById),
+    lanes.length,
+  );
+}
+
+function getSpaceProjectionAtTime(
+  note: Note,
+  timeMs: number,
+  lanes: LaneConfig[],
+  sourceLaneIndexById: Map<string, number>,
+): SpaceProjection {
+  return getSpaceProjectionFromRegion(
+    getSpaceRegionAtTime(note, timeMs, lanes, sourceLaneIndexById),
+    lanes.length,
+  );
+}
+
+function getSpaceProjectionFromRegion(region: SpaceHoldRegion | undefined, laneCount: number): SpaceProjection {
+  if (!region) {
+    return {
+      startIndex: 0,
+      span: MIN_SPACE_SPAN,
+      judgeStartIndex: 0,
+      judgeSpan: 0,
+      isJudgeable: false,
+    };
+  }
+  const sourceStartIndex = region.startIndex;
+  const sourceSpan = clampSpaceSpan(region.span);
   const visualStartIndex = sourceStartIndex;
   const visualEndIndex = sourceStartIndex + sourceSpan;
   const sourceOverlapStart = Math.max(0, sourceStartIndex);
@@ -4440,7 +4934,7 @@ function getSpaceProjection(
   if (!isJudgeable) {
     return {
       startIndex: visualStartIndex,
-      span: Math.max(0.25, visualEndIndex - visualStartIndex),
+      span: Math.max(MIN_SPACE_SPAN, visualEndIndex - visualStartIndex),
       judgeStartIndex: 0,
       judgeSpan: 0,
       isJudgeable: false,
@@ -4449,11 +4943,131 @@ function getSpaceProjection(
 
   return {
     startIndex: visualStartIndex,
-    span: Math.max(0.25, visualEndIndex - visualStartIndex),
+    span: Math.max(MIN_SPACE_SPAN, visualEndIndex - visualStartIndex),
     judgeStartIndex: sourceOverlapStart,
     judgeSpan: sourceOverlapEnd - sourceOverlapStart,
     isJudgeable: true,
   };
+}
+
+function getSpaceHoldSegments(note: Note): ResolvedSpaceHoldSegment[] {
+  if (!note.isSpace || note.type !== "hold") return [];
+  const fallbackStartTimeMs = note.timeMs;
+  const fallbackEndTimeMs = note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS);
+  const fallbackStartLaneIndex = getNoteAnchorIndex(note);
+  const fallbackWidth = clampSpaceSpan(note.span ?? 1);
+  const sourceSegments = Array.isArray(note.spaceHoldSegments) && note.spaceHoldSegments.length
+    ? note.spaceHoldSegments
+    : [{
+      startTimeMs: fallbackStartTimeMs,
+      endTimeMs: fallbackEndTimeMs,
+      startLaneIndex: fallbackStartLaneIndex,
+      endLaneIndex: fallbackStartLaneIndex,
+      width: fallbackWidth,
+      hand: DEFAULT_SPACE_HOLD_HAND,
+      isConnector: false,
+    }];
+
+  return sourceSegments
+    .map((segment) => normalizeSpaceHoldSegment(segment, fallbackStartTimeMs, fallbackEndTimeMs, fallbackStartLaneIndex, fallbackWidth))
+    .filter((segment) => segment.isConnector || segment.endTimeMs > segment.startTimeMs)
+    .sort((a, b) => a.startTimeMs - b.startTimeMs || a.startLaneIndex - b.startLaneIndex);
+}
+
+function normalizeSpaceHoldSegment(
+  segment: Partial<SpaceHoldSegment>,
+  fallbackStartTimeMs: number,
+  fallbackEndTimeMs: number,
+  fallbackStartLaneIndex: number,
+  fallbackWidth: number,
+): ResolvedSpaceHoldSegment {
+  const startTimeMs = Number.isFinite(segment.startTimeMs)
+    ? Math.round(segment.startTimeMs as number)
+    : fallbackStartTimeMs;
+  const rawEndTimeMs = Number.isFinite(segment.endTimeMs)
+    ? Math.round(segment.endTimeMs as number)
+    : fallbackEndTimeMs;
+  const startLaneIndex = snapSpaceLaneValue(Number.isFinite(segment.startLaneIndex) ? segment.startLaneIndex as number : fallbackStartLaneIndex);
+  const isConnector = Boolean(segment.isConnector);
+  const safeStartTimeMs = Math.min(startTimeMs, rawEndTimeMs);
+  return {
+    startTimeMs: safeStartTimeMs,
+    endTimeMs: isConnector ? safeStartTimeMs : Math.max(startTimeMs + 1, rawEndTimeMs),
+    startLaneIndex,
+    endLaneIndex: snapSpaceLaneValue(Number.isFinite(segment.endLaneIndex) ? segment.endLaneIndex as number : startLaneIndex),
+    width: clampSpaceSpan(Number.isFinite(segment.width) ? segment.width as number : fallbackWidth),
+    hand: normalizeSpaceHoldHand(segment.hand),
+    isConnector,
+  };
+}
+
+function normalizeSpaceHoldHand(hand: unknown): SpaceHoldHand {
+  return hand === "left" || hand === "right" || hand === "neutral" ? hand : DEFAULT_SPACE_HOLD_HAND;
+}
+
+function getSpaceRegionAtTime(
+  note: Note,
+  timeMs: number,
+  lanes: LaneConfig[],
+  sourceLaneIndexById: Map<string, number>,
+): SpaceHoldRegion | undefined {
+  if (!note.isSpace) return undefined;
+  if (note.type !== "hold") {
+    return {
+      startIndex: getSpaceLocalStartIndex(note, lanes, sourceLaneIndexById),
+      span: clampSpaceSpan(note.span ?? 1),
+      hand: DEFAULT_SPACE_HOLD_HAND,
+      segment: {
+        startTimeMs: note.timeMs,
+        endTimeMs: note.timeMs,
+        startLaneIndex: getNoteAnchorIndex(note, sourceLaneIndexById),
+        endLaneIndex: getNoteAnchorIndex(note, sourceLaneIndexById),
+        width: clampSpaceSpan(note.span ?? 1),
+        hand: DEFAULT_SPACE_HOLD_HAND,
+        isConnector: false,
+      },
+    };
+  }
+
+  const segments = getSpaceHoldSegments(note);
+  const segment = segments.find((item) => timeMs >= item.startTimeMs && timeMs <= item.endTimeMs)
+    ?? segments.find((item) => timeMs < item.startTimeMs)
+    ?? segments[segments.length - 1];
+  if (!segment) return undefined;
+  const durationMs = Math.max(1, segment.endTimeMs - segment.startTimeMs);
+  const progress = Math.min(1, Math.max(0, (timeMs - segment.startTimeMs) / durationMs));
+  const physicalStart = segment.startLaneIndex + (segment.endLaneIndex - segment.startLaneIndex) * progress;
+  return {
+    startIndex: physicalStart - getLanePhysicalStartIndex(lanes),
+    span: segment.width,
+    hand: segment.hand,
+    segment,
+  };
+}
+
+function getSpaceHoldBridgeRegion(
+  note: Note,
+  allNotes: Note[],
+  timeMs: number,
+  lanes: LaneConfig[],
+  sourceLaneIndexById: Map<string, number>,
+): { startIndex: number; span: number } | undefined {
+  const ownRegion = getSpaceRegionAtTime(note, timeMs, lanes, sourceLaneIndexById);
+  if (!ownRegion) return undefined;
+  const ownStart = ownRegion.startIndex;
+  const ownEnd = ownStart + ownRegion.span;
+  for (const other of allNotes) {
+    if (other.id === note.id || !other.isSpace || other.type !== "hold" || isSpaceHoldConnectorNote(other)) continue;
+    if (timeMs < other.timeMs || timeMs > getNoteEndTimeMs(other)) continue;
+    const otherRegion = getSpaceRegionAtTime(other, timeMs, lanes, sourceLaneIndexById);
+    if (!otherRegion) continue;
+    const overlapStart = Math.max(ownStart, otherRegion.startIndex);
+    const overlapEnd = Math.min(ownEnd, otherRegion.startIndex + otherRegion.span);
+    if (overlapEnd > overlapStart) {
+      return { startIndex: overlapStart, span: overlapEnd - overlapStart };
+    }
+  }
+  return undefined;
 }
 
 function getBurstProjection(
@@ -4531,8 +5145,16 @@ function roundCssNumber(value: number) {
   return Number(value.toFixed(3));
 }
 
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number) {
+  return endA > startB && endB > startA;
+}
+
 function clampSpaceSpan(value: number) {
-  return Math.min(10, Math.max(1, Math.round(value)));
+  return Math.min(10, Math.max(MIN_SPACE_SPAN, snapSpaceLaneValue(Number.isFinite(value) ? value : 1)));
+}
+
+function snapSpaceLaneValue(value: number) {
+  return Math.round(value / SPACE_LANE_GRID) * SPACE_LANE_GRID;
 }
 
 function clampHoldDurationMs(value: number) {
@@ -4598,7 +5220,7 @@ function isNoteJudgeableAtTime(
   const activeLanesAtTime = getActiveLaneSlice(chart.lanes, getLaneCountAtTime(chart, timeMs));
   if (!isNoteVisibleOnLanes(note, activeLanesAtTime)) return false;
   if (note.isSpace) {
-    return getSpaceProjection(note, activeLanesAtTime, sourceLaneIndexById).isJudgeable;
+    return getSpaceProjectionAtTime(note, timeMs, activeLanesAtTime, sourceLaneIndexById).isJudgeable;
   }
   return activeLanesAtTime.some((lane) => lane.id === note.laneId);
 }
@@ -4647,7 +5269,7 @@ function getSpannedLaneIds(note: Note, lanes: LaneConfig[], laneIndexById: Map<s
   const projection = getSpaceProjection(note, lanes, laneIndexById);
   if (!projection.isJudgeable) return [];
   return lanes
-    .slice(projection.judgeStartIndex, projection.judgeStartIndex + projection.judgeSpan)
+    .filter((_, laneIndex) => rangesOverlap(laneIndex, laneIndex + 1, projection.judgeStartIndex, projection.judgeStartIndex + projection.judgeSpan))
     .map((lane) => lane.id);
 }
 
@@ -4775,12 +5397,12 @@ function getChartKeySoundEvents(
     if (isLaneNote(note)) return [];
     if (note.type === "hold" && (getNoteEndTimeMs(note) < startMs || note.timeMs > endMs)) return [];
     if (note.type !== "hold" && (note.timeMs < startMs || note.timeMs > endMs)) return [];
-    const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById);
-    if (laneIndex === undefined) return [];
     if (note.type === "hold") {
       const events: ChartKeySoundEvent[] = [];
       getHoldDensityTimes(note).forEach((timeMs, tickIndex) => {
         if (timeMs < startMs || timeMs > endMs) return;
+        const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById, timeMs);
+        if (laneIndex === undefined) return;
         events.push({
           id: getHoldTickId(note, tickIndex),
           timeMs,
@@ -4790,6 +5412,8 @@ function getChartKeySoundEvents(
       });
       return events;
     }
+    const laneIndex = getKeySoundLaneIndex(note, lanes, laneIndexById, note.timeMs);
+    if (laneIndex === undefined) return [];
     return [{
       id: `${note.id}:tap`,
       timeMs: note.timeMs,
@@ -4799,13 +5423,13 @@ function getChartKeySoundEvents(
   });
 }
 
-function getKeySoundLaneIndex(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>) {
+function getKeySoundLaneIndex(note: Note, lanes: LaneConfig[], laneIndexById: Map<string, number>, timeMs = note.timeMs) {
   if (note.isSpace) {
-    const projection = getSpaceProjection(note, lanes, laneIndexById);
+    const projection = getSpaceProjectionAtTime(note, timeMs, lanes, laneIndexById);
     if (!projection.isJudgeable) return undefined;
     return Math.min(
       lanes.length - 1,
-      Math.max(0, projection.judgeStartIndex + Math.floor(Math.max(1, projection.judgeSpan) / 2)),
+      Math.max(0, Math.floor(projection.judgeStartIndex + Math.max(MIN_SPACE_SPAN, projection.judgeSpan) / 2)),
     );
   }
   const laneIndex = lanes.findIndex((lane) => lane.id === note.laneId);
@@ -4967,7 +5591,7 @@ function prepareChartForExport(chart: Chart): Chart {
       audioUrl: normalizeExportUrl(chart.meta.audioUrl),
       coverUrl: normalizeExportUrl(chart.meta.coverUrl),
     },
-    notes: assignDefaultTimingGroup(chart.notes).map((note) => ({
+    notes: assignDefaultTimingGroup(chart.notes).map((note) => normalizeImportedNote({
       ...note,
       timingGroupId: validTimingGroupIds.has(note.timingGroupId ?? "") ? note.timingGroupId : DEFAULT_TIMING_GROUP_ID,
     })),
@@ -4996,7 +5620,7 @@ function normalizeImportedChart(parsed: Chart): { chart?: Chart; error?: string 
     const timingGroupId = validTimingGroupIds.has(note.timingGroupId ?? "") ? note.timingGroupId : DEFAULT_TIMING_GROUP_ID;
     return isLaneNote(note)
       ? { ...note, timingGroupId, targetLaneCount: Math.min(parsedLaneCount, clampLaneCount(note.targetLaneCount ?? parsedInitialLaneCount)) }
-      : { ...note, timingGroupId };
+      : normalizeImportedNote({ ...note, timingGroupId });
   });
 
   return {
@@ -5005,6 +5629,39 @@ function normalizeImportedChart(parsed: Chart): { chart?: Chart; error?: string 
       notes: normalizedNotes,
       timingGroups: parsedTimingGroups,
     },
+  };
+}
+
+function normalizeImportedNote(note: Note): Note {
+  if (!note.isSpace) return note;
+  const span = clampSpaceSpan(note.span ?? 1);
+  const anchorLaneIndex = snapSpaceLaneValue(getNoteAnchorIndex(note));
+  if (note.type !== "hold") {
+    return {
+      ...note,
+      span,
+      anchorLaneIndex,
+      spaceHoldSegments: undefined,
+    };
+  }
+  const segments = getSpaceHoldSegments({ ...note, span, anchorLaneIndex }).map((segment) => ({
+    startTimeMs: segment.startTimeMs,
+    endTimeMs: segment.endTimeMs,
+    startLaneIndex: segment.startLaneIndex,
+    endLaneIndex: segment.endLaneIndex,
+    width: segment.width,
+    hand: segment.hand,
+    isConnector: segment.isConnector,
+  }));
+  const startTimeMs = Math.min(note.timeMs, ...segments.map((segment) => segment.startTimeMs));
+  const endTimeMs = Math.max(note.timeMs + clampHoldDurationMs(note.durationMs ?? DEFAULT_HOLD_DURATION_MS), ...segments.map((segment) => segment.endTimeMs));
+  return {
+    ...note,
+    timeMs: startTimeMs,
+    span,
+    anchorLaneIndex,
+    durationMs: clampHoldDurationMs(endTimeMs - startTimeMs),
+    spaceHoldSegments: segments.length ? segments : undefined,
   };
 }
 

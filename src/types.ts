@@ -1,6 +1,7 @@
 export type NoteType = "tap" | "hold" | "lane";
 export type HoldDensityPosition = "head" | "middle" | "tail";
 export type SpaceSide = "left" | "right";
+export type SpaceHoldHand = "neutral" | "left" | "right";
 export type TimingEventType = "speed" | "freeze" | "opacity" | "line";
 
 export interface SongMeta {
@@ -23,6 +24,16 @@ export interface LaneConfig {
   widthUnits: number;
 }
 
+export interface SpaceHoldSegment {
+  startTimeMs: number;
+  endTimeMs: number;
+  startLaneIndex: number;
+  endLaneIndex: number;
+  width: number;
+  hand?: SpaceHoldHand;
+  isConnector?: boolean;
+}
+
 export interface Note {
   id: string;
   timeMs: number;
@@ -32,6 +43,7 @@ export interface Note {
   spaceSide?: SpaceSide;
   span?: number;
   anchorLaneIndex?: number;
+  spaceHoldSegments?: SpaceHoldSegment[];
   targetLaneCount?: number;
   timingGroupId?: string;
   durationMs?: number;
